@@ -28,6 +28,10 @@ class ProviderRequest:
     email_req_id: str = ""
     email_msg_id: str = ""
     email_from: str = ""
+    # Telegram-related fields for telegram caller
+    telegram_req_id: str = ""
+    telegram_chat_id: str = ""
+    telegram_msg_id: str = ""
 
 
 @dataclass

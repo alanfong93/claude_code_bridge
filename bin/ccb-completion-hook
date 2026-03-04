@@ -5,6 +5,7 @@ CCB Completion Hook - Notifies caller when a CCB delegation task completes.
 This script is called by caskd/gaskd/oaskd/daskd when they detect CCB_DONE signal.
 - For terminal callers: sends notification to Claude/Codex/Droid pane
 - For email callers (CCB_CALLER=email): sends reply email via maild
+- For Telegram callers (CCB_CALLER=telegram): sends reply via Telegram Bot API
 
 Usage:
     ccb-completion-hook.py --provider <provider> --output <output_file> [--reply <reply_text>]
@@ -12,10 +13,13 @@ Usage:
 Environment:
     CCB_COMPLETION_HOOK_ENABLED: Set to "0" to disable (default: "1")
     CCB_COMPLETION_HOOK_TIMEOUT: Timeout in seconds (default: 5)
-    CCB_CALLER: Who initiated the request (claude/codex/droid/email)
+    CCB_CALLER: Who initiated the request (claude/codex/droid/email/telegram)
     CCB_EMAIL_REQ_ID: Request ID for email replies
     CCB_EMAIL_MSG_ID: Original email Message-ID for threading
     CCB_EMAIL_FROM: Original sender email address
+    CCB_TELEGRAM_REQ_ID: Request ID for Telegram replies
+    CCB_TELEGRAM_CHAT_ID: Telegram chat ID for sending reply
+    CCB_TELEGRAM_MSG_ID: Telegram message ID for reply threading
 """
 
 from __future__ import annotations
@@ -295,6 +299,98 @@ def send_email_reply(provider: str, reply_content: str) -> bool:
         return False
 
 
+def send_telegram_reply(provider: str, reply_content: str) -> bool:
+    """Send reply via Telegram when CCB_CALLER=telegram."""
+    try:
+        from tgbot.config import load_config as load_tg_config
+        from tgbot.ask_bridge import load_pending_context, cleanup_pending_context
+        from tgbot.formatter import format_reply, should_send_as_file, extract_code_blocks
+    except ImportError as e:
+        print(f"[completion-hook] Failed to import tgbot module: {e}", file=sys.stderr)
+        return False
+
+    # Load Telegram config
+    tg_config = load_tg_config()
+    if not tg_config.bot_token:
+        print("[completion-hook] Telegram bot token not configured", file=sys.stderr)
+        return False
+
+    # Get request context
+    req_id = os.environ.get("CCB_TELEGRAM_REQ_ID", "")
+    chat_id_str = os.environ.get("CCB_TELEGRAM_CHAT_ID", "")
+    msg_id_str = os.environ.get("CCB_TELEGRAM_MSG_ID", "")
+
+    # Try loading from saved pending context
+    if req_id:
+        context = load_pending_context(req_id)
+        if context:
+            chat_id_str = chat_id_str or str(context.get("chat_id", ""))
+            msg_id_str = msg_id_str or str(context.get("message_id", ""))
+
+    if not chat_id_str:
+        print("[completion-hook] No Telegram chat_id (CCB_TELEGRAM_CHAT_ID)", file=sys.stderr)
+        return False
+
+    try:
+        chat_id = int(chat_id_str)
+    except ValueError:
+        print(f"[completion-hook] Invalid chat_id: {chat_id_str}", file=sys.stderr)
+        return False
+
+    msg_id = None
+    if msg_id_str:
+        try:
+            msg_id = int(msg_id_str)
+        except ValueError:
+            pass
+
+    # Format and send reply
+    import asyncio
+
+    async def _send():
+        from telegram import Bot
+
+        bot = Bot(token=tg_config.bot_token)
+
+        # Check if response should be sent as a file
+        if should_send_as_file(reply_content, tg_config):
+            text_part, code_blocks = extract_code_blocks(reply_content)
+            # Send text summary
+            if text_part.strip():
+                messages = format_reply(provider, text_part, tg_config)
+                for msg in messages:
+                    await bot.send_message(chat_id=chat_id, text=msg, reply_to_message_id=msg_id)
+
+            # Send code blocks as files
+            import io
+            for lang, code in code_blocks:
+                ext = lang if lang != "txt" else "txt"
+                file_obj = io.BytesIO(code.encode("utf-8"))
+                file_obj.name = f"response.{ext}"
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=file_obj,
+                    caption=f"[{provider.capitalize()}] Code ({lang})",
+                    reply_to_message_id=msg_id,
+                )
+        else:
+            # Send as regular message(s)
+            messages = format_reply(provider, reply_content, tg_config)
+            for msg in messages:
+                await bot.send_message(chat_id=chat_id, text=msg, reply_to_message_id=msg_id)
+
+    try:
+        asyncio.run(_send())
+        print(f"[completion-hook] Telegram reply sent to chat {chat_id}")
+        # Cleanup saved context
+        if req_id:
+            cleanup_pending_context(req_id)
+        return True
+    except Exception as e:
+        print(f"[completion-hook] Failed to send Telegram reply: {e}", file=sys.stderr)
+        return False
+
+
 def main() -> int:
     if not env_bool("CCB_COMPLETION_HOOK_ENABLED", True):
         return 0
@@ -325,6 +421,12 @@ def main() -> int:
     # Handle email caller - send reply via email
     if caller == "email":
         if send_email_reply(provider, reply_content):
+            return 0
+        return 1
+
+    # Handle Telegram caller - send reply via Telegram Bot API
+    if caller == "telegram":
+        if send_telegram_reply(provider, reply_content):
             return 0
         return 1
 

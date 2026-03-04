@@ -163,6 +163,9 @@ class UnifiedAskDaemon:
                 email_req_id=str(msg.get("email_req_id") or ""),
                 email_msg_id=str(msg.get("email_msg_id") or ""),
                 email_from=str(msg.get("email_from") or ""),
+                telegram_req_id=str(msg.get("telegram_req_id") or ""),
+                telegram_chat_id=str(msg.get("telegram_chat_id") or ""),
+                telegram_msg_id=str(msg.get("telegram_msg_id") or ""),
             )
         except Exception as exc:
             return {

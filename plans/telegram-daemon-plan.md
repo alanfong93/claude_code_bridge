@@ -114,6 +114,33 @@ Summary: User (Telegram) -> Bot API (cloud) -> telegramd (long-polling) -> valid
 
 ---
 
+## Usage & Workflow
+
+### Prerequisites
+The Telegram daemon does **not** start AI providers — it only provides a remote interface to **already running** providers. You must start providers separately first.
+
+### Typical Workflow
+```bash
+cd D:\Projects\my-project          # 1. Navigate to your project
+ccb -a -r claude, gemini           # 2. Start AI providers in WezTerm
+ccb telegram start                 # 3. Start Telegram bot (uses current directory as work_dir)
+```
+
+### Working Directory
+The daemon captures the **current working directory** at startup and passes it as `CCB_WORK_DIR` when submitting requests to the ASK system. This means:
+- One daemon instance = one project directory
+- To switch projects: `ccb telegram stop` → `cd new-project` → `ccb telegram start`
+- The directory determines which project context AI providers operate in
+
+### What Happens Without Providers Running
+If you send `claude: hello` via Telegram but no Claude session is running, the ASK system will fail and the bot will reply with an error message. Use `/pulse` to check which providers are online before sending commands.
+
+### v2 Enhancement (Planned)
+- `--workdir` flag: `ccb telegram start --workdir D:\Projects\my-project`
+- In-message project switching: `claude: @my-project fix the bug`
+
+---
+
 ## Technical Considerations
 
 - **Async bridge**: python-telegram-bot v20+ is async; CCB's ASK system is subprocess-based. Bridge via `asyncio.create_subprocess_exec` or `run_in_executor`.
@@ -121,6 +148,41 @@ Summary: User (Telegram) -> Bot API (cloud) -> telegramd (long-polling) -> valid
 - **Windows permissions**: No `chmod 0600` on Windows. Use ACLs for config file protection.
 - **Stale state cleanup**: On daemon restart, clean up pending JSON files from crashed sessions (check age threshold).
 - **python-telegram-bot version**: Pin to `>=20.0,<21.0` for stability.
+
+---
+
+## End-to-End Testing Results (2026-03-05)
+
+### Bugs Found & Fixed During Testing
+
+| # | Bug | Root Cause | Fix |
+|---|-----|-----------|-----|
+| 1 | `ccb telegram setup` launched default CCB mode | Edited repo copy of `ccb`, but runtime uses installed copy at `AppData\Local\codex-dual\` | Copied `lib/tgbot/`, `bin/telegramd` to installed location; applied `cmd_telegram()` to installed `ccb` |
+| 2 | `UnboundLocalError: project_root` on start | `shutil.which` branch didn't define `project_root` but `cwd=` used it | Changed to `work_dir = Path.cwd()` — semantically correct (user's project dir) |
+| 3 | `ask exited with code 1` (empty stderr) | Message passed via `input=message` (stdin) but `ask` expects positional CLI arg | Changed to `[*ask_cmd, provider, "-t", "3600", message]` |
+| 4 | `askd daemon not running` error | `DETACHED_PROCESS` on Windows didn't inherit `CCB_RUN_DIR` env var | Added explicit `env=os.environ.copy()` to `subprocess.Popen` |
+| 5 | Daemon log file empty | `close_fds=True` closed inherited file handles in detached child | Removed `close_fds=True` |
+| 6 | `.BAT` wrapper breaking subprocess capture | `ask.BAT` runs via `cmd.exe`, mangles stdout/stderr capture | Bypass `.BAT`, call `python ask` script directly via `sys.executable` |
+| 7 | `Pane not alive: 1` despite pane being alive | `WEZTERM_UNIX_SOCKET` missing when daemon started from PowerShell (not WezTerm) | Auto-detect socket by scanning `~/.local/share/wezterm/gui-sock-*` |
+
+### Key Insight
+When `ccb telegram start` is run from PowerShell (outside WezTerm), the process lacks WezTerm-specific env vars. The `ask` command ultimately needs `wezterm cli list` to check pane liveness, which requires `WEZTERM_UNIX_SOCKET`. Auto-detection from the filesystem makes the daemon terminal-agnostic.
+
+### Verified Flow
+User sends `"gemini: hello what can you help me with"` from Telegram → telegramd receives via long-polling → handler parses `gemini:` prefix → submit_to_ask calls `ask gemini` → askd routes to Gemini WezTerm pane → Gemini responds → completion hook sends reply back to Telegram chat. **Confirmed working.**
+
+### Known Limitation: Pane Occupancy
+Each provider pane is single-threaded. If a pane is already busy (e.g., an active Claude Code session), telegram requests to that provider will queue in askd until the pane is free. This is expected behavior — use a different provider or wait for the pane to become available. The `/pulse` command can help check which providers are idle.
+
+### Additional Bugs Found During E2E Testing (Post-S7)
+
+| # | Bug | Root Cause | Fix |
+|---|-----|-----------|-----|
+| 8 | Completion hook missing telegram branch | Installed `ccb-completion-hook` never synced from repo | Copied repo copy to installed location |
+| 9 | `done_seen=False` blocks completion hook | `notify_completion()` returns early when `done_seen=False` | Bypass `done_seen` check for external callers (email, telegram) |
+| 10 | Telegram env vars not reaching completion hook | `ask` RPC, `ProviderRequest`, adapter, `notify_completion` all lacked telegram field plumbing | Added `telegram_req_id/chat_id/msg_id` through entire chain |
+| 11 | Daemon stdout not captured in log file | `python-telegram-bot` may redirect stdout | Added file-based `_log()` function writing directly to `telegramd.log` |
+| 12 | `ask` timeout after 60s | `subprocess.run(timeout=60)` but `ask` blocks until AI responds | Changed to `Popen` fire-and-forget with 5s initial failure check |
 
 ---
 

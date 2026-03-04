@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""
+telegramd - CCB Telegram Bot Daemon (v1)
+
+Background service for Telegram-based AI provider interaction.
+
+Usage:
+    telegramd start [--foreground]
+    telegramd stop
+    telegramd status
+    telegramd config
+    telegramd setup
+    telegramd --help
+"""
+
+import argparse
+import sys
+import os
+
+# Add lib to path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+lib_dir = os.path.join(project_root, "lib")
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+if lib_dir not in sys.path:
+    sys.path.insert(0, lib_dir)
+
+from tgbot.config import (
+    load_config,
+    save_config,
+    validate_config,
+    is_configured,
+    SUPPORTED_PROVIDERS,
+)
+from tgbot.daemon import (
+    start_daemon,
+    stop_daemon,
+    get_daemon_status,
+    is_daemon_running,
+)
+
+
+def cmd_start(args):
+    """Start the Telegram bot daemon."""
+    config = load_config()
+    if not config.enabled:
+        print("Telegram bot is not enabled.")
+        print("Run 'telegramd setup' to configure and enable.")
+        sys.exit(1)
+
+    errors = validate_config(config)
+    if errors:
+        print("Configuration errors:")
+        for e in errors:
+            print(f"  - {e}")
+        sys.exit(1)
+
+    if is_daemon_running():
+        print("Telegram daemon is already running.")
+        sys.exit(0)
+
+    print("Starting Telegram bot daemon...")
+    start_daemon(foreground=args.foreground)
+
+
+def cmd_stop(args):
+    """Stop the Telegram bot daemon."""
+    if stop_daemon():
+        print("Telegram daemon stopped.")
+    else:
+        sys.exit(1)
+
+
+def cmd_status(args):
+    """Show daemon status."""
+    config = load_config()
+    status = get_daemon_status()
+
+    print("=" * 50)
+    print("CCB Telegram Bot Status")
+    print("=" * 50)
+
+    if status.get("running"):
+        print(f"Status:  RUNNING")
+        print(f"PID:     {status['pid']}")
+        print(f"Version: {status.get('version', 1)}")
+        if status.get("bot_username"):
+            print(f"Bot:     @{status['bot_username']}")
+        uptime = status.get("uptime", 0)
+        hours = int(uptime // 3600)
+        minutes = int((uptime % 3600) // 60)
+        print(f"Uptime:  {hours}h {minutes}m")
+    else:
+        print("Status:  STOPPED")
+
+    print()
+    print("Configuration:")
+    print(f"  Enabled:      {config.enabled}")
+    print(f"  Bot Token:    {'***configured***' if config.bot_token else '(not configured)'}")
+    print(f"  Allowed IDs:  {config.allowed_user_ids or '(none)'}")
+    print(f"  Default:      {config.default_provider}")
+    print()
+    print("Heartbeat:")
+    print(f"  Interval:     {config.heartbeat.interval_seconds}s")
+    print(f"  Typing:       {config.heartbeat.typing_interval_seconds}s")
+    print()
+    print("Formatting:")
+    print(f"  Max Length:   {config.formatting.max_message_length}")
+    print(f"  Code as File: {config.formatting.send_code_as_file}")
+    print(f"  Spoiler Errs: {config.formatting.use_spoiler_for_errors}")
+
+
+def cmd_config(args):
+    """Show full configuration."""
+    config = load_config()
+
+    print("=" * 50)
+    print("CCB Telegram Configuration (v1)")
+    print("=" * 50)
+
+    print(f"Version:        {config.version}")
+    print(f"Enabled:        {config.enabled}")
+    print()
+
+    print("Bot:")
+    print(f"  Token:        {'***configured***' if config.bot_token else '(not set)'}")
+    print(f"  Allowed IDs:  {config.allowed_user_ids or '(none)'}")
+    print()
+
+    print("Routing:")
+    print(f"  Default Provider: {config.default_provider}")
+    print(f"  Case Insensitive: {config.case_insensitive}")
+    print()
+
+    print("Heartbeat:")
+    print(f"  Status Interval:  {config.heartbeat.interval_seconds}s")
+    print(f"  Typing Interval:  {config.heartbeat.typing_interval_seconds}s")
+    print()
+
+    print("Formatting:")
+    print(f"  Max Length:       {config.formatting.max_message_length}")
+    print(f"  Code as File:     {config.formatting.send_code_as_file} (>{config.formatting.code_file_threshold_lines} lines)")
+    print(f"  Spoiler Errors:   {config.formatting.use_spoiler_for_errors}")
+
+    # Validate
+    errors = validate_config(config)
+    if errors:
+        print()
+        print("Validation Errors:")
+        for e in errors:
+            print(f"  - {e}")
+
+
+def cmd_setup(args):
+    """Interactive setup wizard."""
+    config = load_config()
+
+    print("=" * 50)
+    print("CCB Telegram Bot Setup Wizard")
+    print("=" * 50)
+    print()
+
+    # Bot token
+    print("Bot Token (create via @BotFather on Telegram)")
+    print("-" * 50)
+    token_display = "***configured***" if config.bot_token else "(not set)"
+    token = input(f"Bot token [{token_display}]: ").strip()
+    if token:
+        if ":" not in token:
+            print("Warning: Token format looks invalid (expected 'ID:TOKEN').")
+            confirm = input("Save anyway? [y/N]: ").strip().upper()
+            if confirm != "Y":
+                token = ""
+        if token:
+            config.bot_token = token
+            print("Bot token saved.")
+    print()
+
+    # Allowed user IDs
+    print("Allowed User IDs (your Telegram user ID for whitelisting)")
+    print("-" * 50)
+    print("Tip: Send /start to @userinfobot on Telegram to get your ID.")
+    if config.allowed_user_ids:
+        print(f"Current: {config.allowed_user_ids}")
+
+    ids_input = input("User IDs (comma-separated) [keep existing]: ").strip()
+    if ids_input:
+        try:
+            new_ids = [int(x.strip()) for x in ids_input.split(",") if x.strip()]
+            if new_ids:
+                config.allowed_user_ids = new_ids
+                print(f"Allowed user IDs set to: {new_ids}")
+            else:
+                print("No valid IDs entered, keeping existing.")
+        except ValueError:
+            print("Invalid input (must be integers). Keeping existing.")
+    print()
+
+    # Default provider
+    print("Default Provider")
+    print("-" * 50)
+    print(f"Available: {', '.join(SUPPORTED_PROVIDERS)}")
+    default = input(f"Default provider [{config.default_provider}]: ").strip().lower()
+    if default and default in SUPPORTED_PROVIDERS:
+        config.default_provider = default
+    elif default:
+        print(f"Unknown provider '{default}'. Keeping '{config.default_provider}'.")
+    print()
+
+    # Enable service
+    enable = input("Enable Telegram bot? [Y/n]: ").strip().upper()
+    config.enabled = enable != "N"
+
+    # Validate before saving
+    errors = validate_config(config)
+    if errors:
+        print()
+        print("Validation warnings:")
+        for e in errors:
+            print(f"  - {e}")
+
+    # Save
+    save_config(config)
+    print()
+    print("Configuration saved!")
+    print()
+
+    if config.enabled and not errors:
+        print("To start the bot: telegramd start")
+    elif config.enabled:
+        print("Fix the warnings above, then: telegramd start")
+    else:
+        print("Telegram bot is disabled. Enable with: telegramd setup")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="CCB Telegram Bot Daemon (v1)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Commands:
+  start       Start the Telegram bot daemon
+  stop        Stop the Telegram bot daemon
+  status      Show daemon status
+  config      Show configuration
+  setup       Interactive setup wizard
+
+Examples:
+  telegramd start              # Start daemon in background
+  telegramd start -f           # Start in foreground
+  telegramd setup              # Configure bot token and user IDs
+
+Message Format:
+  Send messages to bot with provider prefix:
+    claude: fix the bug
+    gemini: analyze this code
+""",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # start command
+    start_parser = subparsers.add_parser("start", help="Start the daemon")
+    start_parser.add_argument(
+        "--foreground", "-f",
+        action="store_true",
+        help="Run in foreground (don't daemonize)",
+    )
+    start_parser.set_defaults(func=cmd_start)
+
+    # stop command
+    stop_parser = subparsers.add_parser("stop", help="Stop the daemon")
+    stop_parser.set_defaults(func=cmd_stop)
+
+    # status command
+    status_parser = subparsers.add_parser("status", help="Show daemon status")
+    status_parser.set_defaults(func=cmd_status)
+
+    # config command
+    config_parser = subparsers.add_parser("config", help="Show configuration")
+    config_parser.set_defaults(func=cmd_config)
+
+    # setup command
+    setup_parser = subparsers.add_parser("setup", help="Interactive setup wizard")
+    setup_parser.set_defaults(func=cmd_setup)
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

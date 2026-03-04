@@ -32,6 +32,9 @@ def _run_hook_async(
     email_msg_id: str = "",
     email_from: str = "",
     work_dir: str = "",
+    telegram_req_id: str = "",
+    telegram_chat_id: str = "",
+    telegram_msg_id: str = "",
 ) -> None:
     """Run the completion hook in a background thread."""
     if not env_bool("CCB_COMPLETION_HOOK_ENABLED", True):
@@ -84,6 +87,13 @@ def _run_hook_async(
             # Pass work_dir for session file lookup
             if work_dir:
                 env["CCB_WORK_DIR"] = work_dir
+            # Pass telegram-related vars for telegram caller
+            if telegram_req_id:
+                env["CCB_TELEGRAM_REQ_ID"] = telegram_req_id
+            if telegram_chat_id:
+                env["CCB_TELEGRAM_CHAT_ID"] = telegram_chat_id
+            if telegram_msg_id:
+                env["CCB_TELEGRAM_MSG_ID"] = telegram_msg_id
 
             # Pass reply via stdin to avoid command line length limits
             # Use longer timeout for SMTP retries (3 retries * 8s max backoff + send time)
@@ -113,6 +123,9 @@ def notify_completion(
     email_msg_id: str = "",
     email_from: str = "",
     work_dir: str = "",
+    telegram_req_id: str = "",
+    telegram_chat_id: str = "",
+    telegram_msg_id: str = "",
 ) -> None:
     """
     Notify the caller that a CCB delegation task has completed.
@@ -129,7 +142,9 @@ def notify_completion(
         email_from: Original sender email address (for email caller)
         work_dir: Working directory for session file lookup
     """
-    if not done_seen:
+    # For external callers (email, telegram), always attempt delivery
+    # even if done_seen is False — the reply content may still be valid
+    if not done_seen and caller not in ("email", "telegram"):
         return
 
-    _run_hook_async(provider, output_file, reply, req_id, caller, email_req_id, email_msg_id, email_from, work_dir)
+    _run_hook_async(provider, output_file, reply, req_id, caller, email_req_id, email_msg_id, email_from, work_dir, telegram_req_id, telegram_chat_id, telegram_msg_id)

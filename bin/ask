@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 ask - Unified command to send messages to different AI providers.
 
@@ -163,6 +163,12 @@ def _send_via_unified_daemon(
         req["email_req_id"] = os.environ.get("CCB_EMAIL_REQ_ID", "")
         req["email_msg_id"] = os.environ.get("CCB_EMAIL_MSG_ID", "")
         req["email_from"] = os.environ.get("CCB_EMAIL_FROM", "")
+
+    # Pass telegram-related env vars for telegram caller
+    if caller == "telegram":
+        req["telegram_req_id"] = os.environ.get("CCB_TELEGRAM_REQ_ID", "")
+        req["telegram_chat_id"] = os.environ.get("CCB_TELEGRAM_CHAT_ID", "")
+        req["telegram_msg_id"] = os.environ.get("CCB_TELEGRAM_MSG_ID", "")
 
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -470,6 +476,23 @@ def main(argv: list[str]) -> int:
         msg_file = log_dir / f"ask-{provider}-{task_id}.msg"
         msg_file.write_text(message, encoding="utf-8")
 
+        # Collect caller-specific env vars
+        caller_env_lines = ""
+        if caller == "email":
+            for key in ("CCB_EMAIL_REQ_ID", "CCB_EMAIL_MSG_ID", "CCB_EMAIL_FROM"):
+                val = os.environ.get(key, "")
+                if val:
+                    caller_env_lines += f'$env:{key} = "{val}"\n'
+        elif caller == "telegram":
+            for key in ("CCB_TELEGRAM_REQ_ID", "CCB_TELEGRAM_CHAT_ID", "CCB_TELEGRAM_MSG_ID"):
+                val = os.environ.get(key, "")
+                if val:
+                    caller_env_lines += f'$env:{key} = "{val}"\n'
+
+        # Pass CCB_RUN_DIR so background script can find askd state file
+        ccb_run_dir = os.environ.get("CCB_RUN_DIR", "")
+        run_dir_line = f'$env:CCB_RUN_DIR = "{ccb_run_dir}"\n' if ccb_run_dir else ""
+
         # Write PowerShell script - call ask --foreground to use unified daemon
         script_file = log_dir / f"ask-{provider}-{task_id}.ps1"
         script_content = f'''$ErrorActionPreference = "SilentlyContinue"
@@ -477,7 +500,7 @@ def main(argv: list[str]) -> int:
 $env:CCB_REQ_ID = "{task_id}"
 $env:CCB_CALLER = "{caller}"
 $env:CCB_WORK_DIR = "{os.getcwd()}"
-Get-Content -Path "{msg_file}" -Encoding UTF8 | python "{ask_cmd}" {provider} --foreground --timeout {timeout}
+{run_dir_line}{caller_env_lines}Get-Content -Path "{msg_file}" -Encoding UTF8 | python "{ask_cmd}" {provider} --foreground --timeout {timeout}
 '''
         script_file.write_text(script_content, encoding="utf-8")
 
@@ -490,13 +513,18 @@ Get-Content -Path "{msg_file}" -Encoding UTF8 | python "{ask_cmd}" {provider} --
         )
     else:
         # Unix: use nohup, call ask --foreground to use unified daemon
-        # Collect CCB_EMAIL_* env vars for email caller
-        email_env_lines = ""
+        # Collect caller-specific env vars
+        caller_env_lines = ""
         if caller == "email":
             for key in ("CCB_EMAIL_REQ_ID", "CCB_EMAIL_MSG_ID", "CCB_EMAIL_FROM"):
                 val = os.environ.get(key, "")
                 if val:
-                    email_env_lines += f'export {key}="{val}"\n'
+                    caller_env_lines += f'export {key}="{val}"\n'
+        elif caller == "telegram":
+            for key in ("CCB_TELEGRAM_REQ_ID", "CCB_TELEGRAM_CHAT_ID", "CCB_TELEGRAM_MSG_ID"):
+                val = os.environ.get(key, "")
+                if val:
+                    caller_env_lines += f'export {key}="{val}"\n'
 
         # Pass CCB_RUN_DIR so background script can find askd state file
         ccb_run_dir = os.environ.get("CCB_RUN_DIR", "")
@@ -506,7 +534,7 @@ Get-Content -Path "{msg_file}" -Encoding UTF8 | python "{ask_cmd}" {provider} --
 export CCB_REQ_ID="{task_id}"
 export CCB_CALLER="{caller}"
 export CCB_WORK_DIR="{os.getcwd()}"
-{run_dir_line}{email_env_lines}python3 "{ask_cmd}" {provider} --foreground --timeout {timeout} <<'ASKEOF'
+{run_dir_line}{caller_env_lines}python3 "{ask_cmd}" {provider} --foreground --timeout {timeout} <<'ASKEOF'
 {message}
 ASKEOF
 '''

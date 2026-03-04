@@ -4475,6 +4475,186 @@ def cmd_mail(argv: list[str]) -> int:
     return 1
 
 
+def cmd_telegram(argv: list[str]) -> int:
+    """Handle ccb telegram subcommands."""
+    parser = argparse.ArgumentParser(prog="ccb telegram", description="Telegram bot commands")
+    subparsers = parser.add_subparsers(dest="subcommand", help="Telegram subcommands")
+
+    subparsers.add_parser("setup", help="Run Telegram bot configuration wizard")
+    start_p = subparsers.add_parser("start", help="Start Telegram bot daemon")
+    start_p.add_argument("-f", "--foreground", action="store_true", help="Run in foreground")
+    subparsers.add_parser("stop", help="Stop Telegram bot daemon")
+    subparsers.add_parser("status", help="Show Telegram bot status")
+    subparsers.add_parser("config", help="Show current configuration")
+
+    args = parser.parse_args(argv)
+
+    if args.subcommand == "setup":
+        try:
+            from tgbot.config import load_config as tg_load_config, save_config as tg_save_config
+            from tgbot.config import validate_config as tg_validate, SUPPORTED_PROVIDERS
+            config = tg_load_config()
+
+            print("=" * 50)
+            print("CCB Telegram Bot Setup Wizard")
+            print("=" * 50)
+            print()
+
+            print("Bot Token (create via @BotFather on Telegram)")
+            print("-" * 50)
+            token_display = "***configured***" if config.bot_token else "(not set)"
+            token = input(f"Bot token [{token_display}]: ").strip()
+            if token:
+                if ":" not in token:
+                    print("Warning: Token format looks invalid (expected 'ID:TOKEN').")
+                    confirm = input("Save anyway? [y/N]: ").strip().upper()
+                    if confirm != "Y":
+                        token = ""
+                if token:
+                    config.bot_token = token
+                    print("Bot token saved.")
+            print()
+
+            print("Allowed User IDs (your Telegram user ID for whitelisting)")
+            print("-" * 50)
+            print("Tip: Send /start to @userinfobot on Telegram to get your ID.")
+            if config.allowed_user_ids:
+                print(f"Current: {config.allowed_user_ids}")
+            ids_input = input("User IDs (comma-separated) [keep existing]: ").strip()
+            if ids_input:
+                try:
+                    new_ids = [int(x.strip()) for x in ids_input.split(",") if x.strip()]
+                    if new_ids:
+                        config.allowed_user_ids = new_ids
+                        print(f"Allowed user IDs set to: {new_ids}")
+                except ValueError:
+                    print("Invalid input (must be integers). Keeping existing.")
+            print()
+
+            print("Default Provider")
+            print("-" * 50)
+            print(f"Available: {', '.join(SUPPORTED_PROVIDERS)}")
+            default = input(f"Default provider [{config.default_provider}]: ").strip().lower()
+            if default and default in SUPPORTED_PROVIDERS:
+                config.default_provider = default
+            elif default:
+                print(f"Unknown provider '{default}'. Keeping '{config.default_provider}'.")
+            print()
+
+            enable = input("Enable Telegram bot? [Y/n]: ").strip().upper()
+            config.enabled = enable != "N"
+
+            errors = tg_validate(config)
+            if errors:
+                print()
+                print("Validation warnings:")
+                for e in errors:
+                    print(f"  - {e}")
+
+            tg_save_config(config)
+            print()
+            print("Configuration saved!")
+            if config.enabled and not errors:
+                print("To start the bot: ccb telegram start")
+            return 0
+        except ImportError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    if args.subcommand == "start":
+        try:
+            from tgbot.daemon import start_daemon, is_daemon_running
+            from tgbot.config import load_config as tg_load_config, validate_config as tg_validate
+
+            config = tg_load_config()
+            if not config.enabled:
+                print("Telegram bot is not enabled. Run 'ccb telegram setup' first.")
+                return 1
+            errors = tg_validate(config)
+            if errors:
+                print("Configuration errors:")
+                for e in errors:
+                    print(f"  - {e}")
+                return 1
+            if is_daemon_running():
+                print("Telegram daemon is already running.")
+                return 0
+            print("Starting Telegram bot daemon...")
+            start_daemon(foreground=args.foreground)
+            return 0
+        except ImportError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    if args.subcommand == "stop":
+        try:
+            from tgbot.daemon import stop_daemon
+            return 0 if stop_daemon() else 1
+        except ImportError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    if args.subcommand == "status":
+        try:
+            from tgbot.config import load_config as tg_load_config
+            from tgbot.daemon import get_daemon_status
+
+            config = tg_load_config()
+            status = get_daemon_status()
+            print("Telegram Bot Status")
+            print("=" * 40)
+            print(f"  Configured: {'Yes' if config.bot_token else 'No'}")
+            print(f"  Enabled:    {'Yes' if config.enabled else 'No'}")
+            print(f"  Allowed:    {config.allowed_user_ids or '(none)'}")
+            print(f"  Provider:   {config.default_provider}")
+            if status.get("running"):
+                print(f"  Daemon:     Running (PID: {status['pid']})")
+                if status.get("bot_username"):
+                    print(f"  Bot:        @{status['bot_username']}")
+                uptime = status.get("uptime", 0)
+                hours = int(uptime // 3600)
+                minutes = int((uptime % 3600) // 60)
+                print(f"  Uptime:     {hours}h {minutes}m")
+            else:
+                print("  Daemon:     Stopped")
+            return 0
+        except ImportError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    if args.subcommand == "config":
+        try:
+            from tgbot.config import load_config as tg_load_config, validate_config as tg_validate
+
+            config = tg_load_config()
+            print("Telegram Configuration")
+            print("=" * 40)
+            print(f"  Enabled:          {config.enabled}")
+            print(f"  Bot Token:        {'***configured***' if config.bot_token else '(not set)'}")
+            print(f"  Allowed IDs:      {config.allowed_user_ids or '(none)'}")
+            print(f"  Default Provider: {config.default_provider}")
+            print(f"  Case Insensitive: {config.case_insensitive}")
+            print(f"  Heartbeat:        {config.heartbeat.interval_seconds}s")
+            print(f"  Typing:           {config.heartbeat.typing_interval_seconds}s")
+            print(f"  Max Msg Length:   {config.formatting.max_message_length}")
+            print(f"  Code as File:     {config.formatting.send_code_as_file}")
+            print(f"  Spoiler Errors:   {config.formatting.use_spoiler_for_errors}")
+
+            errors = tg_validate(config)
+            if errors:
+                print()
+                print("Validation Errors:")
+                for e in errors:
+                    print(f"  - {e}")
+            return 0
+        except ImportError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    parser.print_help()
+    return 1
+
+
 def cmd_droid_subcommand(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="ccb droid", description="Droid-specific commands")
     subparsers = parser.add_subparsers(dest="subcommand", help="Droid subcommands")
@@ -4545,10 +4725,14 @@ def main():
     if argv and argv[0] == "mail":
         return cmd_mail(argv[1:])
 
+    # Handle 'ccb telegram' subcommand
+    if argv and argv[0] == "telegram":
+        return cmd_telegram(argv[1:])
+
     start_parser = argparse.ArgumentParser(
         description="Claude AI unified launcher",
         add_help=True,
-        epilog="Other commands: ccb update | ccb version | ccb kill | ccb uninstall | ccb reinstall | ccb droid setup-delegation | ccb mail setup",
+        epilog="Other commands: ccb update | ccb version | ccb kill | ccb uninstall | ccb reinstall | ccb droid setup-delegation | ccb mail setup | ccb telegram setup",
     )
     start_parser.add_argument(
         "providers",

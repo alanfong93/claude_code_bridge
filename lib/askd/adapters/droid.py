@@ -201,6 +201,9 @@ class DroidAdapter(BaseProviderAdapter):
             email_msg_id=req.email_msg_id,
             email_from=req.email_from,
             work_dir=req.work_dir,
+            telegram_req_id=req.telegram_req_id,
+            telegram_chat_id=req.telegram_chat_id,
+            telegram_msg_id=req.telegram_msg_id,
         )
 
         result = ProviderResult(
