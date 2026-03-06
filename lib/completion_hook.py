@@ -35,6 +35,7 @@ def _run_hook_async(
     telegram_req_id: str = "",
     telegram_chat_id: str = "",
     telegram_msg_id: str = "",
+    done_seen: bool = True,
 ) -> None:
     """Run the completion hook in a background thread."""
     if not env_bool("CCB_COMPLETION_HOOK_ENABLED", True):
@@ -78,6 +79,7 @@ def _run_hook_async(
             # Set up environment with caller and email-related vars
             env = os.environ.copy()
             env["CCB_CALLER"] = caller  # Ensure caller is passed via env var
+            env["CCB_DONE_SEEN"] = "1" if done_seen else "0"  # Pass completion status
             if email_req_id:
                 env["CCB_EMAIL_REQ_ID"] = email_req_id
             if email_msg_id:
@@ -109,7 +111,8 @@ def _run_hook_async(
 
     thread = threading.Thread(target=_run, daemon=False)
     thread.start()
-    thread.join(timeout=65)  # Wait for hook to complete (match subprocess timeout + buffer)
+    # Wait briefly to ensure hook starts, but don't block worker for full duration
+    thread.join(timeout=2.0)
 
 
 def notify_completion(
@@ -144,7 +147,7 @@ def notify_completion(
     """
     # For external callers (email, telegram), always attempt delivery
     # even if done_seen is False — the reply content may still be valid
-    if not done_seen and caller not in ("email", "telegram"):
-        return
-
-    _run_hook_async(provider, output_file, reply, req_id, caller, email_req_id, email_msg_id, email_from, work_dir, telegram_req_id, telegram_chat_id, telegram_msg_id)
+    # Always notify completion, even if done_seen and caller not in ("email", "telegram")=False
+    # Let the hook receiver decide how to handle incomplete/timeout cases
+    # This prevents "processing forever" when CCB_DONE marker is missing/mismatched
+    _run_hook_async(provider, output_file, reply, req_id, caller, email_req_id, email_msg_id, email_from, work_dir, telegram_req_id, telegram_chat_id, telegram_msg_id, done_seen)
