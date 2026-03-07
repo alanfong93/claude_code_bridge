@@ -4700,6 +4700,8 @@ def cmd_telegram(argv: list[str]) -> int:
     start_p = subparsers.add_parser("start", help="Start Telegram bot daemon")
     start_p.add_argument("-f", "--foreground", action="store_true", help="Run in foreground")
     subparsers.add_parser("stop", help="Stop Telegram bot daemon")
+    restart_p = subparsers.add_parser("restart", help="Restart Telegram bot daemon")
+    restart_p.add_argument("-f", "--foreground", action="store_true", help="Run in foreground")
     subparsers.add_parser("status", help="Show Telegram bot status")
     subparsers.add_parser("config", help="Show current configuration")
 
@@ -4806,6 +4808,31 @@ def cmd_telegram(argv: list[str]) -> int:
         try:
             from tgbot.daemon import stop_daemon
             return 0 if stop_daemon() else 1
+        except ImportError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    if args.subcommand == "restart":
+        try:
+            from tgbot.daemon import stop_daemon, start_daemon, is_daemon_running
+            from tgbot.config import load_config as tg_load_config, validate_config as tg_validate
+
+            config = tg_load_config()
+            if not config.enabled:
+                print("Telegram bot is not enabled. Run 'ccb telegram setup' first.")
+                return 1
+            errors = tg_validate(config)
+            if errors:
+                print("Configuration errors:")
+                for e in errors:
+                    print(f"  - {e}")
+                return 1
+            if is_daemon_running():
+                print("Stopping Telegram bot daemon...")
+                stop_daemon()
+            print("Starting Telegram bot daemon...")
+            start_daemon(foreground=args.foreground)
+            return 0
         except ImportError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
