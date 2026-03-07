@@ -285,10 +285,32 @@ class TelegramDaemon:
                 await update.message.reply_text(
                     f"Failed to submit to {provider}: {result.message}"
                 )
+            else:
+                # Monitor pending context file — when completion hook cleans
+                # it up (after sending the reply), stop the heartbeat.
+                asyncio.create_task(
+                    self._watch_pending_completion(req_id, chat_id)
+                )
         except Exception as e:
             await heartbeat.stop()
             self._active_heartbeats.pop(chat_id, None)
             await update.message.reply_text(f"Error: {e}")
+
+    async def _watch_pending_completion(
+        self, req_id: str, chat_id: int, timeout: float = 3600.0,
+    ) -> None:
+        """Watch for completion hook to clean up pending context, then stop heartbeat."""
+        from .ask_bridge import load_pending_context
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            await asyncio.sleep(5.0)
+            # When the completion hook finishes, it removes the pending context file
+            ctx = load_pending_context(req_id)
+            if ctx is None:
+                break
+        heartbeat = self._active_heartbeats.pop(chat_id, None)
+        if heartbeat:
+            await heartbeat.stop()
 
     def start(self) -> None:
         """Start the Telegram bot daemon (blocking)."""

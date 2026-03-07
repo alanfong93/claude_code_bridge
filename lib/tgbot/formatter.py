@@ -106,20 +106,42 @@ def format_error_reply(error_text: str, config: TelegramConfig) -> str:
     return error_text
 
 
+_ERROR_KEYWORDS = (
+    "pane died during request",
+    "pane died",
+    "interrupted",
+    "Failed to",
+    "Error:",
+    "timed out",
+    "timeout",
+)
+
+
 def format_reply(
     provider: str,
     reply_text: str,
     config: TelegramConfig,
+    is_error: bool = False,
 ) -> List[str]:
     """Format a provider reply for Telegram delivery.
 
     Returns a list of message strings to send (may be multiple if splitting needed).
+
+    Args:
+        is_error: Explicitly mark as error. Also auto-detected from reply content.
     """
     if not reply_text:
         return [f"[{provider.capitalize()}] (empty response)"]
 
-    # Prefix with provider name
-    formatted = f"[{provider.capitalize()}]\n{reply_text}"
+    # Auto-detect errors from reply content
+    if not is_error and any(kw in reply_text for kw in _ERROR_KEYWORDS):
+        is_error = True
+
+    # Prefix with provider name and error indicator
+    if is_error:
+        formatted = f"\u26a0\ufe0f [{provider.capitalize()}] Error\n{reply_text}"
+    else:
+        formatted = f"[{provider.capitalize()}]\n{reply_text}"
 
     # Split if needed
     return split_message(formatted)

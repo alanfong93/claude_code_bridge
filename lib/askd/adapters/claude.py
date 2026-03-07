@@ -542,10 +542,20 @@ class ClaudeAdapter(BaseProviderAdapter):
         backend.send_text(pane_id, prompt)
 
         # Use structured Claude session logs only
-        result = self._wait_for_response(
-            task, session, session_key, started_ms, log_reader, state, backend, pane_id, deadline
-        )
-        result.reply = self._postprocess_reply(req, result.reply)
+        try:
+            result = self._wait_for_response(
+                task, session, session_key, started_ms, log_reader, state, backend, pane_id, deadline
+            )
+            result.reply = self._postprocess_reply(req, result.reply)
+        except Exception as exc:
+            _write_log(f"[ERROR] Unhandled exception in Claude adapter: {exc}")
+            result = ProviderResult(
+                exit_code=1,
+                reply=f"Internal error: {exc}",
+                req_id=task.req_id,
+                session_key=session_key,
+                done_seen=False,
+            )
         self._finalize_result(result, req, task)
         return result
 
@@ -613,6 +623,7 @@ class ClaudeAdapter(BaseProviderAdapter):
         tail_bytes = int(os.environ.get("CCB_LASKD_REBIND_TAIL_BYTES", str(2 * 1024 * 1024)))
         pane_check_interval = float(os.environ.get("CCB_LASKD_PANE_CHECK_INTERVAL", "2.0"))
         last_pane_check = time.time()
+        pane_fail_count = 0
 
         while True:
             if deadline is not None:
@@ -626,9 +637,15 @@ class ClaudeAdapter(BaseProviderAdapter):
             if time.time() - last_pane_check >= pane_check_interval:
                 try:
                     alive = bool(backend.is_alive(pane_id))
-                except Exception:
-                    alive = False
-                if not alive:
+                    if alive:
+                        pane_fail_count = 0
+                    else:
+                        pane_fail_count += 1
+                except Exception as exc:
+                    pane_fail_count += 1
+                    _write_log(f"[WARN] Pane liveness check failed (count={pane_fail_count}): {exc}")
+
+                if pane_fail_count >= 3:
                     _write_log(f"[ERROR] Pane {pane_id} died req_id={task.req_id}")
                     return ProviderResult(
                         exit_code=1,

@@ -128,6 +128,7 @@ class CodexAdapter(BaseProviderAdapter):
         rebounded = False
         tail_bytes = int(os.environ.get("CCB_CASKD_REBIND_TAIL_BYTES", str(2 * 1024 * 1024)))
         last_pane_check = time.time()
+        pane_fail_count = 0
         default_interval = "5.0" if is_windows() else "2.0"
         pane_check_interval = float(os.environ.get("CCB_CASKD_PANE_CHECK_INTERVAL", default_interval))
 
@@ -148,9 +149,15 @@ class CodexAdapter(BaseProviderAdapter):
             if time.time() - last_pane_check >= pane_check_interval:
                 try:
                     alive = bool(backend.is_alive(pane_id))
-                except Exception:
-                    alive = False
-                if not alive:
+                    if alive:
+                        pane_fail_count = 0
+                    else:
+                        pane_fail_count += 1
+                except Exception as exc:
+                    pane_fail_count += 1
+                    _write_log(f"[WARN] Pane liveness check failed (count={pane_fail_count}): {exc}")
+
+                if pane_fail_count >= 3:
                     _write_log(f"[ERROR] Pane {pane_id} died during request req_id={task.req_id}")
                     codex_log_path = None
                     try:

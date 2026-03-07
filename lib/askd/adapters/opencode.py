@@ -162,6 +162,7 @@ class OpenCodeAdapter(BaseProviderAdapter):
 
         pane_check_interval = float(os.environ.get("CCB_OASKD_PANE_CHECK_INTERVAL", "2.0"))
         last_pane_check = time.time()
+        pane_fail_count = 0
 
         while True:
             # Check for cancellation
@@ -180,9 +181,15 @@ class OpenCodeAdapter(BaseProviderAdapter):
             if time.time() - last_pane_check >= pane_check_interval:
                 try:
                     alive = bool(backend.is_alive(pane_id))
-                except Exception:
-                    alive = False
-                if not alive:
+                    if alive:
+                        pane_fail_count = 0
+                    else:
+                        pane_fail_count += 1
+                except Exception as exc:
+                    pane_fail_count += 1
+                    _write_log(f"[WARN] Pane liveness check failed (count={pane_fail_count}): {exc}")
+
+                if pane_fail_count >= 3:
                     _write_log(f"[ERROR] Pane {pane_id} died during request req_id={task.req_id}")
                     return ProviderResult(
                         exit_code=1,

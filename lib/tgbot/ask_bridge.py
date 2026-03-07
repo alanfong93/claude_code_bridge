@@ -198,7 +198,23 @@ def submit_to_ask(
     # Ensure WezTerm socket is discoverable (needed for pane liveness checks).
     # When daemon starts from PowerShell or a non-WezTerm terminal, these
     # env vars won't exist. Auto-detect from the known socket directory.
-    if "WEZTERM_UNIX_SOCKET" not in env:
+    if sys.platform == "win32":
+        # On Windows, WezTerm uses named pipes. The wezterm CLI discovers its
+        # server automatically on Windows, but we ensure the CLI is findable.
+        # No WEZTERM_UNIX_SOCKET needed — wezterm cli uses Windows IPC natively.
+        import shutil
+        if not shutil.which("wezterm"):
+            # Try common install locations so the CLI is available to subprocesses
+            for wez_path in [
+                Path(os.environ.get("PROGRAMFILES", "")) / "WezTerm",
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "WezTerm",
+                Path.home() / "scoop" / "apps" / "wezterm" / "current",
+            ]:
+                if (wez_path / "wezterm.exe").exists():
+                    env["PATH"] = str(wez_path) + os.pathsep + env.get("PATH", "")
+                    _log(f"[telegramd] Added WezTerm to PATH: {wez_path}")
+                    break
+    elif "WEZTERM_UNIX_SOCKET" not in env:
         import glob
         sock_dir = Path.home() / ".local" / "share" / "wezterm"
         socks = sorted(glob.glob(str(sock_dir / "gui-sock-*")))
@@ -209,20 +225,27 @@ def submit_to_ask(
     try:
         # Fire-and-forget: ask blocks until AI responds (can take minutes).
         # We don't wait — the completion hook sends the reply to Telegram.
+        # Use a temp file for stderr to avoid pipe buffer deadlocks on
+        # long-running processes (pipes fill up if nobody drains them).
+        import tempfile
+        stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
         proc = subprocess.Popen(
             [*ask_cmd, provider, "-t", "3600", message],
             cwd=work_dir,
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
             text=True,
         )
 
         # Brief wait to catch immediate failures (bad config, pane not alive)
         try:
-            _, errs = proc.communicate(timeout=5)
-            # If communicate returns within 5s, ask exited (likely an error)
+            proc.wait(timeout=5)
+            # If wait returns within 5s, ask exited (likely an error)
+            stderr_file.seek(0)
+            errs = stderr_file.read()
+            stderr_file.close()
             if proc.returncode != 0:
                 err = (errs or "").strip()
                 if not err:
@@ -241,7 +264,9 @@ def submit_to_ask(
                 request_id=request_id,
             )
         except subprocess.TimeoutExpired:
-            # This is the SUCCESS case — ask is still running (processing AI request)
+            # This is the SUCCESS case — ask is still running (processing AI request).
+            # Close our handle to stderr — the subprocess keeps its own fd open.
+            stderr_file.close()
             _log(f"[telegramd] Submitted to {provider} (req={request_id}, pid={proc.pid})")
             return AskResult(
                 success=True,
