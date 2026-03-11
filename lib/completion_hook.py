@@ -15,11 +15,66 @@ from pathlib import Path
 from typing import Optional
 
 
+COMPLETION_STATUS_COMPLETED = "completed"
+COMPLETION_STATUS_CANCELLED = "cancelled"
+COMPLETION_STATUS_FAILED = "failed"
+COMPLETION_STATUS_INCOMPLETE = "incomplete"
+
+VALID_COMPLETION_STATUSES = {
+    COMPLETION_STATUS_COMPLETED,
+    COMPLETION_STATUS_CANCELLED,
+    COMPLETION_STATUS_FAILED,
+    COMPLETION_STATUS_INCOMPLETE,
+}
+
+COMPLETION_STATUS_LABELS = {
+    COMPLETION_STATUS_COMPLETED: "Completed",
+    COMPLETION_STATUS_CANCELLED: "Cancelled",
+    COMPLETION_STATUS_FAILED: "Failed",
+    COMPLETION_STATUS_INCOMPLETE: "Incomplete",
+}
+
+COMPLETION_STATUS_MARKERS = {
+    COMPLETION_STATUS_COMPLETED: "[CCB_TASK_COMPLETED]",
+    COMPLETION_STATUS_CANCELLED: "[CCB_TASK_CANCELLED]",
+    COMPLETION_STATUS_FAILED: "[CCB_TASK_FAILED]",
+    COMPLETION_STATUS_INCOMPLETE: "[CCB_TASK_INCOMPLETE]",
+}
+
+
 def env_bool(name: str, default: bool = True) -> bool:
     val = os.environ.get(name, "").strip().lower()
     if not val:
         return default
     return val not in ("0", "false", "no", "off")
+
+
+def normalize_completion_status(status: str | None, *, done_seen: bool = True) -> str:
+    raw = (status or "").strip().lower()
+    if raw in VALID_COMPLETION_STATUSES:
+        return raw
+    return COMPLETION_STATUS_COMPLETED if done_seen else COMPLETION_STATUS_INCOMPLETE
+
+
+def completion_status_label(status: str | None, *, done_seen: bool = True) -> str:
+    normalized = normalize_completion_status(status, done_seen=done_seen)
+    return COMPLETION_STATUS_LABELS[normalized]
+
+
+def completion_status_marker(status: str | None, *, done_seen: bool = True) -> str:
+    normalized = normalize_completion_status(status, done_seen=done_seen)
+    return COMPLETION_STATUS_MARKERS[normalized]
+
+
+def default_reply_for_status(status: str | None, *, done_seen: bool = True) -> str:
+    normalized = normalize_completion_status(status, done_seen=done_seen)
+    if normalized == COMPLETION_STATUS_CANCELLED:
+        return "Task cancelled or timed out before completion."
+    if normalized == COMPLETION_STATUS_FAILED:
+        return "Task failed before producing a complete reply."
+    if normalized == COMPLETION_STATUS_INCOMPLETE:
+        return "Task ended without a confirmed completion marker."
+    return ""
 
 
 def _run_hook_async(
@@ -36,6 +91,7 @@ def _run_hook_async(
     telegram_chat_id: str = "",
     telegram_msg_id: str = "",
     done_seen: bool = True,
+    status: str = COMPLETION_STATUS_COMPLETED,
 ) -> None:
     """Run the completion hook in a background thread."""
     if not env_bool("CCB_COMPLETION_HOOK_ENABLED", True):
@@ -80,6 +136,7 @@ def _run_hook_async(
             env = os.environ.copy()
             env["CCB_CALLER"] = caller  # Ensure caller is passed via env var
             env["CCB_DONE_SEEN"] = "1" if done_seen else "0"  # Pass completion status
+            env["CCB_COMPLETION_STATUS"] = normalize_completion_status(status, done_seen=done_seen)
             if email_req_id:
                 env["CCB_EMAIL_REQ_ID"] = email_req_id
             if email_msg_id:
@@ -129,6 +186,7 @@ def notify_completion(
     telegram_req_id: str = "",
     telegram_chat_id: str = "",
     telegram_msg_id: str = "",
+    status: str | None = None,
 ) -> None:
     """
     Notify the caller that a CCB delegation task has completed.
@@ -144,6 +202,22 @@ def notify_completion(
         email_msg_id: Original email Message-ID (for email caller)
         email_from: Original sender email address (for email caller)
         work_dir: Working directory for session file lookup
+        status: Terminal status for notifications (completed/cancelled/failed/incomplete)
+    """
+    normalized_status = normalize_completion_status(status, done_seen=done_seen)
+    _run_hook_async(
+        provider,
+        output_file,
+        reply,
+        req_id,
+        caller,
+        email_req_id,
+        email_msg_id,
+        email_from,
+        work_dir,
+        done_seen,
+        normalized_status,
+    )
     """
     # For external callers (email, telegram), always attempt delivery
     # even if done_seen is False — the reply content may still be valid

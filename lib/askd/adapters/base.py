@@ -32,6 +32,8 @@ class ProviderRequest:
     telegram_req_id: str = ""
     telegram_chat_id: str = ""
     telegram_msg_id: str = ""
+    # Multi-instance support: optional instance identifier (e.g., 'auth', 'payment')
+    instance: Optional[str] = None
 
 
 @dataclass
@@ -48,6 +50,7 @@ class ProviderResult:
     fallback_scan: bool = False
     log_path: Optional[str] = None
     extra: Optional[dict] = None
+    status: str = ""
 
 
 class QueuedTaskLike(Protocol):
@@ -96,12 +99,12 @@ class BaseProviderAdapter(ABC):
         ...
 
     @abstractmethod
-    def load_session(self, work_dir: Path) -> Optional[Any]:
+    def load_session(self, work_dir: Path, instance: Optional[str] = None) -> Optional[Any]:
         """Load session for the given work directory."""
         ...
 
     @abstractmethod
-    def compute_session_key(self, session: Any) -> str:
+    def compute_session_key(self, session: Any, instance: Optional[str] = None) -> str:
         """Compute a unique session key for routing."""
         ...
 
@@ -122,6 +125,7 @@ class BaseProviderAdapter(ABC):
             req_id=task.req_id,
             session_key=f"{self.key}:unknown",
             done_seen=False,
+            status="failed",
         )
 
     def on_start(self) -> None:

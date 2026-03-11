@@ -115,6 +115,15 @@ SCRIPTS_TO_LINK=(
   bin/dask
   bin/dpend
   bin/dping
+  bin/hask
+  bin/hpend
+  bin/hping
+  bin/bask
+  bin/bpend
+  bin/bping
+  bin/qask
+  bin/qpend
+  bin/qping
   bin/ask
   bin/ccb-ping
   bin/pend
@@ -159,6 +168,9 @@ Optional environment variables:
   CODEX_CLAUDE_COMMAND_DIR Custom Claude commands directory (default: auto-detect)
   CCB_DROID_AUTOINSTALL    Auto-register Droid MCP tools if droid exists (default: 1)
   CCB_DROID_AUTOINSTALL_FORCE Re-register Droid MCP tools (default: 0)
+  CCB_CLAUDE_MD_MODE       CLAUDE.md injection mode: "inline" (default) or "route"
+                           inline = full config in CLAUDE.md (~57 lines)
+                           route  = minimal pointer in CLAUDE.md, full config in ~/.claude/rules/ccb-config.md
 USAGE
 }
 
@@ -970,7 +982,19 @@ except Exception as e:
 
 install_claude_md_config() {
   local claude_md="$HOME/.claude/CLAUDE.md"
-  local template="$INSTALL_PREFIX/config/claude-md-ccb.md"
+  local md_mode="${CCB_CLAUDE_MD_MODE:-inline}"
+  local full_template="$INSTALL_PREFIX/config/claude-md-ccb.md"
+  local route_template="$INSTALL_PREFIX/config/claude-md-ccb-route.md"
+  local external_config="$HOME/.claude/rules/ccb-config.md"
+
+  # Select template based on mode
+  local template
+  if [[ "$md_mode" == "route" ]]; then
+    template="$route_template"
+  else
+    template="$full_template"
+  fi
+
   mkdir -p "$HOME/.claude"
   if ! pick_python_bin; then
     echo "ERROR: python required to update CLAUDE.md"
@@ -982,12 +1006,19 @@ install_claude_md_config() {
     return 1
   fi
 
+  # In route mode, write full config to external file
+  if [[ "$md_mode" == "route" ]]; then
+    mkdir -p "$HOME/.claude/rules"
+    cp "$full_template" "$external_config"
+    echo "Wrote full CCB config to $external_config"
+  fi
+
   local ccb_content
   ccb_content="$(cat "$template")"
 
   if [[ -f "$claude_md" ]]; then
     if grep -q "$CCB_START_MARKER" "$claude_md" 2>/dev/null; then
-      echo "Updating existing CCB config block..."
+      echo "Updating existing CCB config block (mode: $md_mode)..."
       "$PYTHON_BIN" -c "
 import re, sys
 
@@ -1030,7 +1061,7 @@ with open(sys.argv[1], 'w', encoding='utf-8') as f:
     cat "$template" > "$claude_md"
   fi
 
-  echo "Updated AI collaboration rules in $claude_md"
+  echo "Updated AI collaboration rules in $claude_md (mode: $md_mode)"
 }
 
 CCB_ROLES_START_MARKER="<!-- CCB_ROLES_START -->"
@@ -1525,7 +1556,12 @@ install_all() {
   echo "   Project dir    : $INSTALL_PREFIX"
   echo "   Executable dir : $BIN_DIR"
   echo "   Claude commands updated"
-  echo "   Global CLAUDE.md configured with CCB collaboration rules"
+  local md_mode="${CCB_CLAUDE_MD_MODE:-inline}"
+  if [[ "$md_mode" == "route" ]]; then
+    echo "   Global CLAUDE.md configured with CCB route pointer (full config in ~/.claude/rules/ccb-config.md)"
+  else
+    echo "   Global CLAUDE.md configured with CCB collaboration rules (inline)"
+  fi
   echo "   AGENTS.md configured with review rubrics"
   echo "   .clinerules configured with role assignments"
   echo "   Global settings.json permissions added"
@@ -1582,6 +1618,13 @@ with open('$claude_md', 'w', encoding='utf-8') as f:
     else
       echo "WARN: python required to clean CLAUDE.md, please manually remove collaboration rules"
     fi
+  fi
+
+  # Clean up external config file if it exists (route mode)
+  local external_config="$HOME/.claude/rules/ccb-config.md"
+  if [[ -f "$external_config" ]]; then
+    rm -f "$external_config"
+    echo "Removed external CCB config: $external_config"
   fi
 }
 

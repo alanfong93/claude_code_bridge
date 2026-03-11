@@ -37,6 +37,13 @@ lib_dir = script_dir.parent / "lib"
 sys.path.insert(0, str(lib_dir))
 
 from compat import read_stdin_text, setup_windows_encoding
+from completion_hook import (
+    completion_status_label,
+    completion_status_marker,
+    default_reply_for_status,
+    normalize_completion_status,
+)
+from session_utils import find_project_session_file
 
 setup_windows_encoding()
 
@@ -65,6 +72,43 @@ def load_session_file(session_path: Path) -> dict:
             return json.load(f)
     except Exception:
         return {}
+
+
+def _normalize_path_for_match(value: str) -> str:
+    s = (value or "").strip()
+    if not s:
+        return ""
+    try:
+        normalized = str(Path(s).expanduser().resolve())
+    except Exception:
+        try:
+            normalized = str(Path(s).expanduser().absolute())
+        except Exception:
+            normalized = s
+    normalized = normalized.replace("\\", "/").rstrip("/")
+    if os.name == "nt":
+        normalized = normalized.lower()
+    return normalized
+
+
+def _path_is_same_or_parent(parent: str, child: str) -> bool:
+    p = _normalize_path_for_match(parent)
+    c = _normalize_path_for_match(child)
+    if not p or not c:
+        return False
+    if p == c:
+        return True
+    if not c.startswith(p):
+        return False
+    return c[len(p):].startswith("/")
+
+
+def _work_dirs_compatible(session_work_dir: str, request_work_dir: str) -> bool:
+    if not session_work_dir or not request_work_dir:
+        return True
+    # Accept exact match and parent->child relationship to support subdirectory calls
+    # without letting nested child projects hijack parent-project notifications.
+    return _path_is_same_or_parent(session_work_dir, request_work_dir)
 
 
 def send_via_terminal(pane_id: str, message: str, terminal: str, session_data: dict) -> bool:
@@ -207,7 +251,37 @@ def find_ask_command() -> str | None:
     return None
 
 
-def send_email_reply(provider: str, reply_content: str) -> bool:
+def _render_terminal_message(
+    provider_display: str,
+    req_id: str,
+    reply_content: str,
+    *,
+    output_file: str | None,
+    status: str,
+) -> str:
+    marker = completion_status_marker(status)
+    status_label = completion_status_label(status)
+    if output_file:
+        return f"""CCB_REQ_ID: {req_id}
+
+{marker}
+Provider: {provider_display}
+Status: {status_label}
+Output file: {output_file}
+
+Result: {reply_content}
+"""
+    return f"""CCB_REQ_ID: {req_id}
+
+{marker}
+Provider: {provider_display}
+Status: {status_label}
+
+Result: {reply_content}
+"""
+
+
+def send_email_reply(provider: str, reply_content: str, *, status: str) -> bool:
     """Send reply via email when CCB_CALLER=email."""
     try:
         from mail import load_config, SmtpSender
@@ -264,8 +338,9 @@ def send_email_reply(provider: str, reply_content: str) -> bool:
         # Remove common reply prefixes (case insensitive)
         subject = re.sub(r'^(Re:\s*|RE:\s*|回复：\s*|回复:\s*)+', '', subject, flags=re.IGNORECASE)
 
+    status_label = completion_status_label(status)
     if not subject:
-        subject = f"[CCB] {provider.capitalize()} response"
+        subject = f"[CCB] {provider.capitalize()} {status_label.lower()}"
 
     # Build references chain for threading
     refs = ""
@@ -277,7 +352,7 @@ def send_email_reply(provider: str, reply_content: str) -> bool:
         refs = msg_id
 
     sender = SmtpSender(config)
-    body = f"[{provider.capitalize()}] {reply_content}"
+    body = f"[{provider.capitalize()} {status_label}] {reply_content}"
 
     success, result = sender.send_reply(
         to_addr=from_addr,
@@ -417,10 +492,14 @@ def main() -> int:
         reply_content = read_stdin_text()
     if not reply_content:
         reply_content = args.reply or ""
+    done_seen = env_bool("CCB_DONE_SEEN", True)
+    status = normalize_completion_status(os.environ.get("CCB_COMPLETION_STATUS", ""), done_seen=done_seen)
+    if not reply_content:
+        reply_content = default_reply_for_status(status, done_seen=done_seen)
 
     # Handle email caller - send reply via email
     if caller == "email":
-        if send_email_reply(provider, reply_content):
+        if send_email_reply(provider, reply_content, status=status):
             return 0
         return 1
 
@@ -429,6 +508,9 @@ def main() -> int:
         if send_telegram_reply(provider, reply_content):
             return 0
         return 1
+
+    if caller == "manual":
+        return 0
 
     # Terminal caller - construct notification message
     provider_names = {
@@ -440,58 +522,70 @@ def main() -> int:
     provider_display = provider_names.get(provider, provider.capitalize())
     req_id = args.req_id or "unknown"
 
-    if output_file:
-        message = f"""CCB_REQ_ID: {req_id}
-
-[CCB_TASK_COMPLETED]
-Provider: {provider_display}
-Output file: {output_file}
-
-Result: {reply_content}
-"""
-    else:
-        message = f"""CCB_REQ_ID: {req_id}
-
-[CCB_TASK_COMPLETED]
-Provider: {provider_display}
-
-Result: {reply_content}
-"""
+    message = _render_terminal_message(
+        provider_display,
+        req_id,
+        reply_content,
+        output_file=output_file,
+        status=status,
+    )
 
     # Find caller's pane_id from session file
     session_files = {
         "claude": ".claude-session",
         "codex": ".codex-session",
+        "gemini": ".gemini-session",
+        "opencode": ".opencode-session",
         "droid": ".droid-session",
     }
     session_filename = session_files.get(caller, ".claude-session")
 
     # Search for session file in multiple locations (order matters - most specific first)
     work_dir = os.environ.get("CCB_WORK_DIR", "")
-    search_paths = []
+    search_paths: list[Path] = []
+    seen_paths: set[str] = set()
     config_dirnames = (".ccb", ".ccb_config")
 
-    # 1. Request's work_dir (most specific)
-    if work_dir:
-        for dirname in config_dirnames:
-            search_paths.append(Path(work_dir) / dirname / session_filename)
+    def add_search_path(path: Path | None) -> None:
+        if not path:
+            return
+        p = Path(path)
+        key = str(p)
+        if key in seen_paths:
+            return
+        seen_paths.add(key)
+        search_paths.append(p)
 
-    # 2. Current working directory (fallback)
+    # 1. Request's work_dir (most specific), with upward lookup for nested dirs.
+    if work_dir:
+        try:
+            add_search_path(find_project_session_file(Path(work_dir), session_filename))
+        except Exception:
+            pass
+
+    # 2. Current working directory (fallback), with upward lookup.
     cwd = os.getcwd()
     if cwd != work_dir:
-        for dirname in config_dirnames:
-            search_paths.append(Path(cwd) / dirname / session_filename)
+        try:
+            add_search_path(find_project_session_file(Path(cwd), session_filename))
+        except Exception:
+            pass
 
     # 3. User's home-based locations
     for dirname in config_dirnames:
-        search_paths.append(Path.home() / ".local" / "share" / "codex-dual" / dirname / session_filename)
+        add_search_path(Path.home() / ".local" / "share" / "codex-dual" / dirname / session_filename)
 
     # 4. On Windows, also check LOCALAPPDATA
     if os.name == "nt":
         localappdata = os.environ.get("LOCALAPPDATA", "")
         if localappdata:
             for dirname in reversed(config_dirnames):
-                search_paths.insert(0, Path(localappdata) / "codex-dual" / dirname / session_filename)
+                p = Path(localappdata) / "codex-dual" / dirname / session_filename
+                key = str(p)
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                search_paths.insert(0, p)
 
     pane_id = None
     terminal = "tmux"  # default
@@ -507,7 +601,7 @@ Result: {reply_content}
                 found_session_path = session_path
                 # Validate: check if session's work_dir matches request's work_dir
                 session_work_dir = session_data.get("work_dir", "")
-                if work_dir and session_work_dir and session_work_dir != work_dir:
+                if work_dir and session_work_dir and not _work_dirs_compatible(str(session_work_dir), str(work_dir)):
                     # Session file is for a different project, skip it
                     pane_id = None
                     continue

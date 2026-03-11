@@ -5,7 +5,7 @@ from pathlib import Path
 from session_utils import find_project_session_file, safe_write_session
 
 
-def test_find_project_session_file_is_local_only(tmp_path: Path) -> None:
+def test_find_project_session_file_walks_upward(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     leaf = root / "a" / "b" / "c"
     leaf.mkdir(parents=True)
@@ -14,7 +14,7 @@ def test_find_project_session_file_is_local_only(tmp_path: Path) -> None:
     session.write_text("{}", encoding="utf-8")
 
     found = find_project_session_file(leaf, ".codex-session")
-    assert found is None
+    assert found == session
     assert find_project_session_file(root, ".codex-session") == session
 
 

@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, Iterable
 
 from cli_output import atomic_write_text
 from project_id import compute_ccb_project_id
+from providers import parse_qualified_provider
 from terminal import get_backend_for_session
 
 REGISTRY_PREFIX = "ccb-session-"
@@ -139,8 +140,12 @@ def _get_providers_map(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 
 def _provider_pane_alive(record: Dict[str, Any], provider: str) -> bool:
+    base_provider, _ = parse_qualified_provider(provider)
     providers = _get_providers_map(record)
+    # Try qualified key first, fall back to base provider
     entry = providers.get((provider or "").strip().lower())
+    if not isinstance(entry, dict):
+        entry = providers.get(base_provider)
     if not isinstance(entry, dict):
         return False
 
@@ -224,6 +229,9 @@ def load_registry_by_project_id(ccb_project_id: str, provider: str) -> Optional[
     if not proj or not prov:
         return None
 
+    # Support instance-qualified provider keys (e.g., "codex:auth")
+    base_prov, _ = parse_qualified_provider(prov)
+
     best: Optional[Dict[str, Any]] = None
     best_ts = -1
     best_needs_migration = False
@@ -251,7 +259,8 @@ def load_registry_by_project_id(ccb_project_id: str, provider: str) -> Optional[
         if effective != proj:
             continue
 
-        if not _provider_pane_alive(data, prov):
+        # Use base provider for pane alive check
+        if not _provider_pane_alive(data, base_prov):
             continue
 
         # Prefer the newest record for this project+provider.

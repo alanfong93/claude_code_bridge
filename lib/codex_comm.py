@@ -267,37 +267,47 @@ class CodexLogReader:
 
         return latest
 
+    def _scan_latest_any(self) -> Optional[Path]:
+        if not self.root.exists():
+            return None
+        try:
+            latest: Optional[Path] = None
+            latest_mtime = -1.0
+            for p in (p for p in self.root.glob("**/*.jsonl") if p.is_file()):
+                if self._work_dir:
+                    cwd = self._extract_cwd_from_log(p)
+                    if not cwd or cwd != self._work_dir:
+                        continue
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime >= latest_mtime:
+                    latest = p
+                    latest_mtime = mtime
+        except OSError:
+            return None
+        return latest
+
     def _latest_log(self) -> Optional[Path]:
         preferred = self._preferred_log
         if preferred and preferred.exists():
-            # If we're bound to a specific session id, check if there's a newer session
             if self._session_id_filter:
-                # Periodically check for newer sessions (every 10 seconds)
-                now = time.time()
-                if not hasattr(self, '_last_session_check'):
-                    self._last_session_check = now
-
-                if now - self._last_session_check >= 10.0:
-                    self._last_session_check = now
-                    # Temporarily disable filter to scan all sessions
-                    old_filter = self._session_id_filter
-                    self._session_id_filter = None
-                    latest = self._scan_latest()
-                    self._session_id_filter = old_filter
-
-                    if latest and latest != preferred:
+                latest_any = self._scan_latest_any()
+                if latest_any and latest_any != preferred:
+                    threshold = _env_float("CCB_CODEX_STALE_LOG_SECONDS", 10.0)
+                    if threshold > 0:
                         try:
                             preferred_mtime = preferred.stat().st_mtime
-                            latest_mtime = latest.stat().st_mtime
-                            if latest_mtime > preferred_mtime + 5.0:  # At least 5s newer
-                                self._debug(f"[Active Detection] Found newer session, switching: {latest}")
-                                self._preferred_log = latest
-                                # Clear filter to allow reading new session
-                                self._session_id_filter = None
-                                return latest
+                            latest_mtime = latest_any.stat().st_mtime
+                            if latest_mtime - preferred_mtime >= threshold:
+                                self._preferred_log = latest_any
+                                self._debug(f"Preferred log stale (bound); switching to latest: {latest_any}")
+                                return latest_any
                         except OSError:
-                            pass
-
+                            self._preferred_log = latest_any
+                            self._debug(f"Preferred log stat failed (bound); switching to latest: {latest_any}")
+                            return latest_any
                 self._debug(f"Using preferred log (bound): {preferred}")
                 return preferred
 

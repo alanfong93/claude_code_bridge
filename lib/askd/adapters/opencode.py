@@ -12,7 +12,14 @@ from typing import Any, Optional
 
 from askd.adapters.base import BaseProviderAdapter, ProviderRequest, ProviderResult, QueuedTask
 from askd_runtime import log_path, write_log
-from completion_hook import notify_completion
+from completion_hook import (
+    COMPLETION_STATUS_CANCELLED,
+    COMPLETION_STATUS_COMPLETED,
+    COMPLETION_STATUS_FAILED,
+    COMPLETION_STATUS_INCOMPLETE,
+    default_reply_for_status,
+    notify_completion,
+)
 from env_utils import env_bool
 from oaskd_protocol import is_done_text, strip_done_text, wrap_opencode_prompt
 from oaskd_session import load_project_session
@@ -50,10 +57,10 @@ class OpenCodeAdapter(BaseProviderAdapter):
     def session_filename(self) -> str:
         return ".opencode-session"
 
-    def load_session(self, work_dir: Path) -> Optional[Any]:
-        return load_project_session(work_dir)
+    def load_session(self, work_dir: Path, instance: Optional[str] = None) -> Optional[Any]:
+        return load_project_session(work_dir, instance)
 
-    def compute_session_key(self, session: Any) -> str:
+    def compute_session_key(self, session: Any, instance: Optional[str] = None) -> str:
         if not session:
             return "opencode:unknown"
         ccb_project_id = ""
@@ -63,7 +70,8 @@ class OpenCodeAdapter(BaseProviderAdapter):
                 ccb_project_id = compute_ccb_project_id(Path(session.work_dir))
         except Exception:
             pass
-        return f"opencode:{ccb_project_id}" if ccb_project_id else "opencode:unknown"
+        prefix = f"opencode:{instance}" if instance else "opencode"
+        return f"{prefix}:{ccb_project_id}" if ccb_project_id else f"{prefix}:unknown"
 
     def handle_task(self, task: QueuedTask) -> ProviderResult:
         started_ms = _now_ms()
@@ -71,8 +79,9 @@ class OpenCodeAdapter(BaseProviderAdapter):
         work_dir = Path(req.work_dir)
         _write_log(f"[INFO] start provider=opencode req_id={task.req_id} work_dir={req.work_dir}")
 
-        session = load_project_session(work_dir)
-        session_key = self.compute_session_key(session)
+        instance = task.request.instance
+        session = load_project_session(work_dir, instance)
+        session_key = self.compute_session_key(session, instance)
 
         if not session:
             return ProviderResult(
@@ -81,6 +90,7 @@ class OpenCodeAdapter(BaseProviderAdapter):
                 req_id=task.req_id,
                 session_key=session_key,
                 done_seen=False,
+                status=COMPLETION_STATUS_FAILED,
             )
 
         # Cross-process serialization lock
@@ -96,6 +106,7 @@ class OpenCodeAdapter(BaseProviderAdapter):
                 req_id=task.req_id,
                 session_key=session_key,
                 done_seen=False,
+                status=COMPLETION_STATUS_FAILED,
             )
 
         try:
@@ -114,6 +125,7 @@ class OpenCodeAdapter(BaseProviderAdapter):
                 req_id=task.req_id,
                 session_key=session_key,
                 done_seen=False,
+                status=COMPLETION_STATUS_FAILED,
             )
         pane_id = pane_or_err
 
@@ -125,6 +137,7 @@ class OpenCodeAdapter(BaseProviderAdapter):
                 req_id=task.req_id,
                 session_key=session_key,
                 done_seen=False,
+                status=COMPLETION_STATUS_FAILED,
             )
 
         log_reader = OpenCodeLogReader(
@@ -153,6 +166,7 @@ class OpenCodeAdapter(BaseProviderAdapter):
                 session_key=session_key,
                 done_seen=True,
                 done_ms=_now_ms() - started_ms,
+                status=COMPLETION_STATUS_COMPLETED,
             )
 
         deadline = None if float(req.timeout_s) < 0.0 else (time.time() + float(req.timeout_s))
@@ -197,6 +211,7 @@ class OpenCodeAdapter(BaseProviderAdapter):
                         req_id=task.req_id,
                         session_key=session_key,
                         done_seen=False,
+                        status=COMPLETION_STATUS_FAILED,
                     )
                 last_pane_check = time.time()
 
@@ -212,42 +227,28 @@ class OpenCodeAdapter(BaseProviderAdapter):
 
         combined = "\n".join(chunks)
         final_reply = strip_done_text(combined, task.req_id)
-
-        # Fallback: if timeout but we have a reply with any CCB_DONE marker,
-        # accept it even if req_id doesn't match (degraded completion detection)
-        if not done_seen and chunks and "CCB_DONE:" in combined:
-            _write_log(f"[WARN] Found CCB_DONE but req_id mismatch for req_id={task.req_id}")
-            # Extract the mismatched req_id for logging
-            for line in combined.splitlines():
-                if "CCB_DONE:" in line:
-                    _write_log(f"[WARN] Expected: CCB_DONE: {task.req_id}, Found: {line.strip()}")
-                    break
-            # Only accept if we have non-empty reply
-            if final_reply.strip():
-                done_seen = True
-                done_ms = _now_ms() - started_ms
-            else:
-                _write_log(f"[WARN] Degraded completion rejected: empty reply for req_id={task.req_id}")
-
-        # Skip completion hook for cancelled tasks
-        if not task.cancelled:
-            notify_completion(
-                provider="opencode",
-                output_file=req.output_path,
-                reply=final_reply,
-                req_id=task.req_id,
-                done_seen=done_seen,
-                caller=req.caller,
-                email_req_id=req.email_req_id,
-                email_msg_id=req.email_msg_id,
-                email_from=req.email_from,
-                work_dir=req.work_dir,
+        status = COMPLETION_STATUS_COMPLETED if done_seen else COMPLETION_STATUS_INCOMPLETE
+        if task.cancelled:
+            status = COMPLETION_STATUS_CANCELLED
+        reply_for_hook = final_reply
+        if not reply_for_hook.strip():
+            reply_for_hook = default_reply_for_status(status, done_seen=done_seen)
+        notify_completion(
+            provider="opencode",
+            output_file=req.output_path,
+            reply=reply_for_hook,
+            req_id=task.req_id,
+            done_seen=done_seen,
+            status=status,
+            caller=req.caller,
+            email_req_id=req.email_req_id,
+            email_msg_id=req.email_msg_id,
+            email_from=req.email_from,
+            work_dir=req.work_dir,
             telegram_req_id=req.telegram_req_id,
             telegram_chat_id=req.telegram_chat_id,
             telegram_msg_id=req.telegram_msg_id,
-            )
-        else:
-            _write_log(f"[INFO] Task cancelled, skipping completion hook: req_id={task.req_id}")
+        )
 
         result = ProviderResult(
             exit_code=0 if done_seen else 2,
@@ -256,6 +257,7 @@ class OpenCodeAdapter(BaseProviderAdapter):
             session_key=session_key,
             done_seen=done_seen,
             done_ms=done_ms,
+            status=status,
         )
         _write_log(f"[INFO] done provider=opencode req_id={task.req_id} exit={result.exit_code}")
         return result

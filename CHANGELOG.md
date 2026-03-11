@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## v5.2.8 (2026-03-07)
+
+### 📝 Documentation
+
+- **tmux Layout Tip**: Added English and Chinese usage notes explaining that `Ctrl+b` then `Space` cycles tmux layouts and can be pressed repeatedly
+
+## v5.2.7 (2026-03-07)
+
+### 🔧 Stability Fixes
+
+- **Completion Status**: Completion hook now distinguishes `completed`, `cancelled`, `failed`, and `incomplete` instead of reporting every terminal state as completed
+- **Cancellation Handling**: Gemini and Claude adapters now consistently honor cancellation and emit a terminal status instead of leaving requests stuck in processing
+- **Routing Safety**: Completion routing now keeps parent-project to subdirectory compatibility while preventing nested child sessions from hijacking parent notifications
+- **Codex Session Binding**: Bound Codex requests no longer drift to a newer session log in the same worktree
+- **askd Startup Guardrails**: `bin/ask` now respects `CCB_ASKD_AUTOSTART=0` and scrubs inherited daemon lifecycle env before spawning askd
+- **Claude Session Backfill**: `ccb` startup again backfills `work_dir` and `work_dir_norm` into existing `.claude-session` files
+- **Regression Tests**: Added focused tests for completion status handling, caller routing, autostart behavior, cancellation paths, and Codex session binding
+
 ## v5.2.5 (2026-02-15)
 
 ### 🔧 Bug Fixes

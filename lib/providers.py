@@ -133,3 +133,113 @@ DASK_CLIENT_SPEC = ProviderClientSpec(
     daemon_bin_name="askd",
     daemon_module="askd.daemon",
 )
+
+
+# Copilot (GitHub Copilot CLI)
+HASKD_SPEC = ProviderDaemonSpec(
+    daemon_key="haskd",
+    protocol_prefix="hask",
+    state_file_name="haskd.json",
+    log_file_name="haskd.log",
+    idle_timeout_env="CCB_HASKD_IDLE_TIMEOUT_S",
+    lock_name="haskd",
+)
+
+
+HASK_CLIENT_SPEC = ProviderClientSpec(
+    protocol_prefix="hask",
+    enabled_env="CCB_HASKD",
+    autostart_env_primary="CCB_HASKD_AUTOSTART",
+    autostart_env_legacy="CCB_AUTO_HASKD",
+    state_file_env="CCB_HASKD_STATE_FILE",
+    session_filename=".copilot-session",
+    daemon_bin_name="askd",
+    daemon_module="askd.daemon",
+)
+
+
+# CodeBuddy (Tencent CodeBuddy CLI)
+BASKD_SPEC = ProviderDaemonSpec(
+    daemon_key="baskd",
+    protocol_prefix="bask",
+    state_file_name="baskd.json",
+    log_file_name="baskd.log",
+    idle_timeout_env="CCB_BASKD_IDLE_TIMEOUT_S",
+    lock_name="baskd",
+)
+
+
+BASK_CLIENT_SPEC = ProviderClientSpec(
+    protocol_prefix="bask",
+    enabled_env="CCB_BASKD",
+    autostart_env_primary="CCB_BASKD_AUTOSTART",
+    autostart_env_legacy="CCB_AUTO_BASKD",
+    state_file_env="CCB_BASKD_STATE_FILE",
+    session_filename=".codebuddy-session",
+    daemon_bin_name="askd",
+    daemon_module="askd.daemon",
+)
+
+
+# ── Qwen (qwen-code CLI) ──────────────────────────────────────────────────────
+QASKD_SPEC = ProviderDaemonSpec(
+    daemon_key="qaskd",
+    protocol_prefix="qask",
+    state_file_name="qaskd.json",
+    log_file_name="qaskd.log",
+    idle_timeout_env="CCB_QASKD_IDLE_TIMEOUT_S",
+    lock_name="qaskd",
+)
+
+QASK_CLIENT_SPEC = ProviderClientSpec(
+    protocol_prefix="qask",
+    enabled_env="CCB_QASKD",
+    autostart_env_primary="CCB_QASKD_AUTOSTART",
+    autostart_env_legacy="CCB_AUTO_QASKD",
+    state_file_env="CCB_QASKD_STATE_FILE",
+    session_filename=".qwen-session",
+    daemon_bin_name="askd",
+    daemon_module="askd.daemon",
+)
+
+
+# ── Multi-instance provider utilities ────────────────────────────────────────
+
+
+def parse_qualified_provider(key: str) -> tuple[str, str | None]:
+    """Parse 'codex:auth' -> ('codex', 'auth'); 'codex' -> ('codex', None)."""
+    key = (key or "").strip().lower()
+    if not key:
+        return ("", None)
+    # Only split on first colon to separate provider from instance
+    parts = key.split(":", 1)
+    base = parts[0].strip()
+    instance = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+    return (base, instance)
+
+
+def make_qualified_key(base: str, instance: str | None) -> str:
+    """Combine base provider and instance: 'codex' + 'auth' -> 'codex:auth'."""
+    base = (base or "").strip().lower()
+    if instance:
+        return f"{base}:{instance.strip()}"
+    return base
+
+
+def session_filename_for_instance(base_filename: str, instance: str | None) -> str:
+    """Derive instance-specific session filename.
+
+    '.codex-session' + 'auth' -> '.codex-auth-session'
+    '.codex-session' + None  -> '.codex-session'
+    """
+    if not instance:
+        return base_filename
+    instance = instance.strip()
+    if not instance:
+        return base_filename
+    # Insert instance before '-session' suffix
+    if base_filename.endswith("-session"):
+        prefix = base_filename[:-len("-session")]
+        return f"{prefix}-{instance}-session"
+    # Fallback: append instance before extension
+    return f"{base_filename}-{instance}"

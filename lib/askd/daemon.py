@@ -16,7 +16,7 @@ from askd.adapters.base import BaseProviderAdapter, ProviderRequest, ProviderRes
 from askd.registry import ProviderRegistry
 from askd_runtime import log_path, random_token, state_file_path, write_log
 from ccb_protocol import make_req_id
-from providers import ProviderDaemonSpec
+from providers import ProviderDaemonSpec, make_qualified_key, parse_qualified_provider
 from worker_pool import BaseSessionWorker, PerSessionWorkerPool
 
 
@@ -67,8 +67,9 @@ class _UnifiedWorkerPool:
                 self._pools[provider_key] = PerSessionWorkerPool[_SessionWorker]()
             return self._pools[provider_key]
 
-    def submit(self, provider_key: str, request: ProviderRequest) -> Optional[QueuedTask]:
-        adapter = self._registry.get(provider_key)
+    def submit(self, pool_key: str, request: ProviderRequest) -> Optional[QueuedTask]:
+        base_provider, instance = parse_qualified_provider(pool_key)
+        adapter = self._registry.get(base_provider)
         if not adapter:
             return None
 
@@ -83,10 +84,10 @@ class _UnifiedWorkerPool:
             cancel_event=cancel_event,
         )
 
-        session = adapter.load_session(Path(request.work_dir))
-        session_key = adapter.compute_session_key(session) if session else f"{provider_key}:unknown"
+        session = adapter.load_session(Path(request.work_dir), instance=instance)
+        session_key = adapter.compute_session_key(session, instance=instance) if session else f"{pool_key}:unknown"
 
-        pool = self._get_pool(provider_key)
+        pool = self._get_pool(pool_key)
         worker = pool.get_or_create(
             session_key,
             lambda sk: _SessionWorker(sk, adapter),
@@ -132,14 +133,16 @@ class UnifiedAskDaemon:
                 "reply": "Missing 'provider' field",
             }
 
-        adapter = self.registry.get(provider)
+        base_provider, instance = parse_qualified_provider(provider)
+
+        adapter = self.registry.get(base_provider)
         if not adapter:
             return {
                 "type": "ask.response",
                 "v": 1,
                 "id": msg.get("id"),
                 "exit_code": 1,
-                "reply": f"Unknown provider: {provider}",
+                "reply": f"Unknown provider: {base_provider}",
             }
 
         caller = str(msg.get("caller") or "").strip()
@@ -179,7 +182,9 @@ class UnifiedAskDaemon:
                 "reply": f"Bad request: {exc}",
             }
 
-        task = self.pool.submit(provider, request)
+        request.instance = instance
+        pool_key = make_qualified_key(base_provider, instance)
+        task = self.pool.submit(pool_key, request)
         if not task:
             return {
                 "type": "ask.response",
@@ -219,6 +224,7 @@ class UnifiedAskDaemon:
             "provider": provider,
             "meta": {
                 "session_key": result.session_key,
+                "status": result.status,
                 "done_seen": result.done_seen,
                 "done_ms": result.done_ms,
                 "anchor_seen": result.anchor_seen,

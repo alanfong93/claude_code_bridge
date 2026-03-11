@@ -12,10 +12,12 @@ class _NoopThread(threading.Thread):
     def __init__(self, session_key: str, started: list[str]):
         super().__init__(daemon=True)
         self.session_key = session_key
-        self._started = started
+        self._track = started  # avoid overriding threading.Thread._started
 
     def start(self) -> None:  # type: ignore[override]
-        self._started.append(self.session_key)
+        self._track.append(self.session_key)
+        # Mark as "alive" by setting _started event (required for is_alive() check)
+        self._started.set()
 
 
 def test_per_session_worker_pool_reuses_same_key() -> None:

@@ -14,8 +14,10 @@ from terminal import get_backend_for_session
 apply_backend_env()
 
 
-def find_project_session_file(work_dir: Path) -> Optional[Path]:
-    return _find_project_session_file(work_dir, ".opencode-session")
+def find_project_session_file(work_dir: Path, instance: Optional[str] = None) -> Optional[Path]:
+    from providers import session_filename_for_instance
+    filename = session_filename_for_instance(".opencode-session", instance)
+    return _find_project_session_file(work_dir, filename)
 
 
 def _read_json(path: Path) -> dict:
@@ -114,12 +116,24 @@ class OpenCodeProjectSession:
             return False, "Terminal backend not available"
 
         pane_id = self.pane_id
+        marker = self.pane_title_marker
+        resolver = getattr(backend, "find_pane_by_title_marker", None)
+
         if pane_id and backend.is_alive(pane_id):
+            if marker and callable(resolver):
+                try:
+                    resolved = resolver(marker)
+                    if resolved and str(resolved) != str(pane_id) and backend.is_alive(str(resolved)):
+                        self.data["pane_id"] = str(resolved)
+                        self.data["updated_at"] = _now_str()
+                        self._write_back()
+                        self._attach_pane_log(backend, str(resolved))
+                        return True, str(resolved)
+                except Exception:
+                    pass
             self._attach_pane_log(backend, pane_id)
             return True, pane_id
 
-        marker = self.pane_title_marker
-        resolver = getattr(backend, "find_pane_by_title_marker", None)
         if marker and callable(resolver):
             resolved = resolver(marker)
             if resolved and backend.is_alive(str(resolved)):
@@ -210,8 +224,8 @@ class OpenCodeProjectSession:
             return
 
 
-def load_project_session(work_dir: Path) -> Optional[OpenCodeProjectSession]:
-    session_file = find_project_session_file(work_dir)
+def load_project_session(work_dir: Path, instance: Optional[str] = None) -> Optional[OpenCodeProjectSession]:
+    session_file = find_project_session_file(work_dir, instance)
     if not session_file:
         return None
     data = _read_json(session_file)
@@ -220,7 +234,7 @@ def load_project_session(work_dir: Path) -> Optional[OpenCodeProjectSession]:
     return OpenCodeProjectSession(session_file=session_file, data=data)
 
 
-def compute_session_key(session: OpenCodeProjectSession) -> str:
+def compute_session_key(session: OpenCodeProjectSession, instance: Optional[str] = None) -> str:
     """
     Compute the daemon routing/serialization key for this provider.
 
@@ -232,4 +246,7 @@ def compute_session_key(session: OpenCodeProjectSession) -> str:
             pid = compute_ccb_project_id(Path(session.work_dir))
         except Exception:
             pid = ""
-    return f"opencode:{pid}" if pid else "opencode:unknown"
+    prefix = "opencode"
+    if instance:
+        prefix = f"opencode:{instance}"
+    return f"{prefix}:{pid}" if pid else f"{prefix}:unknown"

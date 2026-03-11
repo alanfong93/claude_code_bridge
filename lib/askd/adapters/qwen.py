@@ -1,7 +1,7 @@
 """
-Droid provider adapter for the unified ask daemon.
+Qwen provider adapter for the unified ask daemon.
 
-Wraps existing daskd_* modules to provide a consistent interface.
+Wraps existing qaskd_* modules to provide a consistent interface.
 """
 from __future__ import annotations
 
@@ -21,10 +21,10 @@ from completion_hook import (
     default_reply_for_status,
     notify_completion,
 )
-from daskd_protocol import extract_reply_for_req, is_done_text, wrap_droid_prompt
-from daskd_session import compute_session_key, load_project_session
-from droid_comm import DroidLogReader
-from providers import DASKD_SPEC
+from qaskd_protocol import extract_reply_for_req, is_done_text, wrap_qwen_prompt
+from qaskd_session import compute_session_key, load_project_session
+from qwen_comm import QwenLogReader
+from providers import QASKD_SPEC
 from terminal import get_backend_for_session
 
 
@@ -33,46 +33,46 @@ def _now_ms() -> int:
 
 
 def _write_log(line: str) -> None:
-    write_log(log_path(DASKD_SPEC.log_file_name), line)
+    write_log(log_path(QASKD_SPEC.log_file_name), line)
 
 
 def _tail_state_for_log(log_path_val: Optional[Path], *, tail_bytes: int) -> dict:
     if not log_path_val or not log_path_val.exists():
-        return {"session_path": log_path_val, "offset": 0, "carry": b""}
+        return {"pane_log_path": log_path_val, "offset": 0}
     try:
         size = log_path_val.stat().st_size
     except OSError:
         size = 0
     offset = max(0, size - max(0, int(tail_bytes)))
-    return {"session_path": log_path_val, "offset": offset, "carry": b""}
+    return {"pane_log_path": log_path_val, "offset": offset}
 
 
-class DroidAdapter(BaseProviderAdapter):
-    """Adapter for Droid provider."""
+class QwenAdapter(BaseProviderAdapter):
+    """Adapter for Qwen provider."""
 
     @property
     def key(self) -> str:
-        return "droid"
+        return "qwen"
 
     @property
     def spec(self):
-        return DASKD_SPEC
+        return QASKD_SPEC
 
     @property
     def session_filename(self) -> str:
-        return ".droid-session"
+        return ".qwen-session"
 
     def load_session(self, work_dir: Path, instance: Optional[str] = None) -> Optional[Any]:
         return load_project_session(work_dir, instance)
 
     def compute_session_key(self, session: Any, instance: Optional[str] = None) -> str:
-        return compute_session_key(session, instance) if session else "droid:unknown"
+        return compute_session_key(session, instance) if session else "qwen:unknown"
 
     def handle_task(self, task: QueuedTask) -> ProviderResult:
         started_ms = _now_ms()
         req = task.request
         work_dir = Path(req.work_dir)
-        _write_log(f"[INFO] start provider=droid req_id={task.req_id} work_dir={req.work_dir}")
+        _write_log(f"[INFO] start provider=qwen req_id={task.req_id} work_dir={req.work_dir}")
 
         instance = task.request.instance
         session = load_project_session(work_dir, instance)
@@ -81,7 +81,7 @@ class DroidAdapter(BaseProviderAdapter):
         if not session:
             return ProviderResult(
                 exit_code=1,
-                reply="No active Droid session found for work_dir.",
+                reply="No active Qwen session found for work_dir.",
                 req_id=task.req_id,
                 session_key=session_key,
                 done_seen=False,
@@ -111,17 +111,18 @@ class DroidAdapter(BaseProviderAdapter):
                 status=COMPLETION_STATUS_FAILED,
             )
 
-        log_reader = DroidLogReader(work_dir=Path(session.work_dir))
-        if session.droid_session_path:
-            try:
-                log_reader.set_preferred_session(Path(session.droid_session_path))
-            except Exception:
-                pass
-        if session.droid_session_id:
-            log_reader.set_session_id_hint(session.droid_session_id)
+        # Qwen uses pane-log based communication (no JSONL session logs)
+        pane_log_path: Optional[Path] = None
+        raw_log = session.data.get("pane_log_path")
+        if raw_log:
+            pane_log_path = Path(str(raw_log)).expanduser()
+        elif session.runtime_dir:
+            pane_log_path = session.runtime_dir / "pane.log"
+
+        log_reader = QwenLogReader(work_dir=Path(session.work_dir), pane_log_path=pane_log_path)
         state = log_reader.capture_state()
 
-        prompt = wrap_droid_prompt(req.message, task.req_id)
+        prompt = wrap_qwen_prompt(req.message, task.req_id)
         backend.send_text(pane_id, prompt)
 
         deadline = None if float(req.timeout_s) < 0.0 else (time.time() + float(req.timeout_s))
@@ -135,10 +136,9 @@ class DroidAdapter(BaseProviderAdapter):
         anchor_grace_deadline = min(deadline, time.time() + 1.5) if deadline else (time.time() + 1.5)
         anchor_collect_grace = min(deadline, time.time() + 2.0) if deadline else (time.time() + 2.0)
         rebounded = False
-        tail_bytes = int(os.environ.get("CCB_DASKD_REBIND_TAIL_BYTES", str(2 * 1024 * 1024)))
-        pane_check_interval = float(os.environ.get("CCB_DASKD_PANE_CHECK_INTERVAL", "2.0"))
+        tail_bytes = int(os.environ.get("CCB_QASKD_REBIND_TAIL_BYTES", str(2 * 1024 * 1024)))
+        pane_check_interval = float(os.environ.get("CCB_QASKD_PANE_CHECK_INTERVAL", "2.0"))
         last_pane_check = time.time()
-        pane_fail_count = 0
 
         while True:
             # Check for cancellation
@@ -157,19 +157,13 @@ class DroidAdapter(BaseProviderAdapter):
             if time.time() - last_pane_check >= pane_check_interval:
                 try:
                     alive = bool(backend.is_alive(pane_id))
-                    if alive:
-                        pane_fail_count = 0
-                    else:
-                        pane_fail_count += 1
-                except Exception as exc:
-                    pane_fail_count += 1
-                    _write_log(f"[WARN] Pane liveness check failed (count={pane_fail_count}): {exc}")
-
-                if pane_fail_count >= 3:
+                except Exception:
+                    alive = False
+                if not alive:
                     _write_log(f"[ERROR] Pane {pane_id} died during request req_id={task.req_id}")
                     return ProviderResult(
                         exit_code=1,
-                        reply="Droid pane died during request",
+                        reply="Qwen pane died during request",
                         req_id=task.req_id,
                         session_key=session_key,
                         done_seen=False,
@@ -183,9 +177,8 @@ class DroidAdapter(BaseProviderAdapter):
             events, state = log_reader.wait_for_events(state, wait_step)
             if not events:
                 if (not rebounded) and (not anchor_seen) and time.time() >= anchor_grace_deadline:
-                    log_reader = DroidLogReader(work_dir=Path(session.work_dir))
-                    log_hint = log_reader.current_session_path()
-                    state = _tail_state_for_log(log_hint, tail_bytes=tail_bytes)
+                    log_reader = QwenLogReader(work_dir=Path(session.work_dir), pane_log_path=pane_log_path)
+                    state = _tail_state_for_log(pane_log_path, tail_bytes=tail_bytes)
                     fallback_scan = True
                     rebounded = True
                 continue
@@ -220,7 +213,7 @@ class DroidAdapter(BaseProviderAdapter):
         if not reply_for_hook.strip():
             reply_for_hook = default_reply_for_status(status, done_seen=done_seen)
         notify_completion(
-            provider="droid",
+            provider="qwen",
             output_file=req.output_path,
             reply=reply_for_hook,
             req_id=task.req_id,
@@ -231,9 +224,6 @@ class DroidAdapter(BaseProviderAdapter):
             email_msg_id=req.email_msg_id,
             email_from=req.email_from,
             work_dir=req.work_dir,
-            telegram_req_id=req.telegram_req_id,
-            telegram_chat_id=req.telegram_chat_id,
-            telegram_msg_id=req.telegram_msg_id,
         )
 
         result = ProviderResult(
@@ -248,5 +238,5 @@ class DroidAdapter(BaseProviderAdapter):
             fallback_scan=fallback_scan,
             status=status,
         )
-        _write_log(f"[INFO] done provider=droid req_id={task.req_id} exit={result.exit_code}")
+        _write_log(f"[INFO] done provider=qwen req_id={task.req_id} exit={result.exit_code}")
         return result

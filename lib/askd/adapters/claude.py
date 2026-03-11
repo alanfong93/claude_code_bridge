@@ -15,7 +15,14 @@ from askd.adapters.base import BaseProviderAdapter, ProviderRequest, ProviderRes
 from askd_runtime import log_path, write_log
 from ccb_protocol import BEGIN_PREFIX, REQ_ID_PREFIX
 from claude_comm import ClaudeLogReader
-from completion_hook import notify_completion
+from completion_hook import (
+    COMPLETION_STATUS_CANCELLED,
+    COMPLETION_STATUS_COMPLETED,
+    COMPLETION_STATUS_FAILED,
+    COMPLETION_STATUS_INCOMPLETE,
+    default_reply_for_status,
+    notify_completion,
+)
 from laskd_registry import get_session_registry
 from laskd_protocol import extract_reply_for_req, is_done_text, wrap_claude_prompt
 from laskd_session import compute_session_key, load_project_session
@@ -480,11 +487,11 @@ class ClaudeAdapter(BaseProviderAdapter):
         except Exception:
             pass
 
-    def load_session(self, work_dir: Path) -> Optional[Any]:
-        return load_project_session(work_dir)
+    def load_session(self, work_dir: Path, instance: Optional[str] = None) -> Optional[Any]:
+        return load_project_session(work_dir, instance)
 
-    def compute_session_key(self, session: Any) -> str:
-        return compute_session_key(session) if session else "claude:unknown"
+    def compute_session_key(self, session: Any, instance: Optional[str] = None) -> str:
+        return compute_session_key(session, instance) if session else "claude:unknown"
 
     def handle_task(self, task: QueuedTask) -> ProviderResult:
         started_ms = _now_ms()
@@ -492,8 +499,9 @@ class ClaudeAdapter(BaseProviderAdapter):
         work_dir = Path(req.work_dir)
         _write_log(f"[INFO] start provider=claude req_id={task.req_id} work_dir={req.work_dir}")
 
-        session = load_project_session(work_dir)
-        session_key = self.compute_session_key(session)
+        instance = task.request.instance
+        session = load_project_session(work_dir, instance)
+        session_key = self.compute_session_key(session, instance)
 
         if not session:
             return ProviderResult(
@@ -502,6 +510,7 @@ class ClaudeAdapter(BaseProviderAdapter):
                 req_id=task.req_id,
                 session_key=session_key,
                 done_seen=False,
+                status=COMPLETION_STATUS_FAILED,
             )
 
         ok, pane_or_err = session.ensure_pane()
@@ -512,6 +521,7 @@ class ClaudeAdapter(BaseProviderAdapter):
                 req_id=task.req_id,
                 session_key=session_key,
                 done_seen=False,
+                status=COMPLETION_STATUS_FAILED,
             )
         pane_id = pane_or_err
 
@@ -523,6 +533,7 @@ class ClaudeAdapter(BaseProviderAdapter):
                 req_id=task.req_id,
                 session_key=session_key,
                 done_seen=False,
+                status=COMPLETION_STATUS_FAILED,
             )
 
         deadline = None if float(req.timeout_s) < 0.0 else (time.time() + float(req.timeout_s))
@@ -562,18 +573,25 @@ class ClaudeAdapter(BaseProviderAdapter):
     def _finalize_result(self, result: ProviderResult, req: ProviderRequest, task: QueuedTask) -> None:
         _write_log(f"[INFO] done provider=claude req_id={result.req_id} exit={result.exit_code}")
 
-        # Skip completion hook for cancelled tasks
+        reply_for_hook = result.reply
+        status = result.status or (COMPLETION_STATUS_COMPLETED if result.done_seen else COMPLETION_STATUS_INCOMPLETE)
         if task.cancelled:
-            _write_log(f"[INFO] Task cancelled, skipping completion hook: req_id={task.req_id}")
-            return
+            _write_log(f"[WARN] Task cancelled, sending cancellation completion hook: req_id={task.req_id}")
+            status = COMPLETION_STATUS_CANCELLED
+        if not (reply_for_hook or "").strip():
+            reply_for_hook = default_reply_for_status(status, done_seen=result.done_seen)
 
-        _write_log(f"[INFO] notify_completion caller={req.caller} done_seen={result.done_seen} email_req_id={req.email_req_id}")
+        _write_log(
+            f"[INFO] notify_completion caller={req.caller} status={status} "
+            f"done_seen={result.done_seen} email_req_id={req.email_req_id}"
+        )
         notify_completion(
             provider="claude",
             output_file=req.output_path,
-            reply=result.reply,
+            reply=reply_for_hook,
             req_id=result.req_id,
             done_seen=result.done_seen,
+            status=status,
             caller=req.caller,
             email_req_id=req.email_req_id,
             email_msg_id=req.email_msg_id,
@@ -626,6 +644,10 @@ class ClaudeAdapter(BaseProviderAdapter):
         pane_fail_count = 0
 
         while True:
+            if task.cancel_event and task.cancel_event.is_set():
+                _write_log(f"[INFO] Task cancelled during wait loop: req_id={task.req_id}")
+                break
+
             if deadline is not None:
                 remaining = deadline - time.time()
                 if remaining <= 0:
@@ -656,6 +678,7 @@ class ClaudeAdapter(BaseProviderAdapter):
                         anchor_seen=anchor_seen,
                         fallback_scan=fallback_scan,
                         anchor_ms=anchor_ms,
+                        status=COMPLETION_STATUS_FAILED,
                     )
                 last_pane_check = time.time()
 
@@ -703,5 +726,8 @@ class ClaudeAdapter(BaseProviderAdapter):
             anchor_seen=anchor_seen,
             anchor_ms=anchor_ms,
             fallback_scan=fallback_scan,
+            status=COMPLETION_STATUS_COMPLETED if done_seen else (
+                COMPLETION_STATUS_CANCELLED if task.cancelled else COMPLETION_STATUS_INCOMPLETE
+            ),
         )
         return result
