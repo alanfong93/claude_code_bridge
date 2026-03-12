@@ -229,15 +229,19 @@ def submit_to_ask(
         # long-running processes (pipes fill up if nobody drains them).
         import tempfile
         stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
-        proc = subprocess.Popen(
-            [*ask_cmd, provider, "-t", "3600", message],
-            cwd=work_dir,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_file,
-            text=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                [*ask_cmd, provider, "-t", "3600", message],
+                cwd=work_dir,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                text=True,
+            )
+        except Exception:
+            stderr_file.close()
+            raise
 
         # Brief wait to catch immediate failures (bad config, pane not alive)
         try:

@@ -27,7 +27,7 @@ PENDING_DIR = "pending"
 CURRENT_CONFIG_VERSION = 1
 
 # Supported AI providers
-SUPPORTED_PROVIDERS = ["claude", "codex", "gemini", "opencode", "droid"]
+SUPPORTED_PROVIDERS = ["claude", "codex", "gemini", "opencode", "droid", "copilot", "codebuddy", "qwen"]
 
 
 @dataclass

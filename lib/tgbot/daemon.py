@@ -237,6 +237,11 @@ class TelegramDaemon:
 
         # Route to ASK system
         if result.route_to_ask and result.provider and result.message:
+            # Stop any existing heartbeat for this chat before starting a new one
+            existing_hb = self._active_heartbeats.pop(chat_id, None)
+            if existing_hb:
+                await existing_hb.stop()
+
             await self._route_to_ask(
                 update, result.provider, result.message,
                 chat_id, message_id, user_id, username,
@@ -412,6 +417,8 @@ def start_daemon(foreground: bool = False) -> None:
                 env=daemon_env,
                 creationflags=creationflags,
             )
+            # Close our handle; the child process has its own fd.
+            log_file.close()
 
             print(f"[telegramd] Started in background (PID: {proc.pid})")
             return
