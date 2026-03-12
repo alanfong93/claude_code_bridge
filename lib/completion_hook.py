@@ -215,13 +215,9 @@ def notify_completion(
         email_msg_id,
         email_from,
         work_dir,
+        telegram_req_id,
+        telegram_chat_id,
+        telegram_msg_id,
         done_seen,
         normalized_status,
     )
-    """
-    # For external callers (email, telegram), always attempt delivery
-    # even if done_seen is False — the reply content may still be valid
-    # Always notify completion, even if done_seen and caller not in ("email", "telegram")=False
-    # Let the hook receiver decide how to handle incomplete/timeout cases
-    # This prevents "processing forever" when CCB_DONE marker is missing/mismatched
-    _run_hook_async(provider, output_file, reply, req_id, caller, email_req_id, email_msg_id, email_from, work_dir, telegram_req_id, telegram_chat_id, telegram_msg_id, done_seen)

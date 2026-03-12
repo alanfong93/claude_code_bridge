@@ -238,16 +238,18 @@ def try_daemon_request(
         if no_wrap in ("1", "true", "yes"):
             payload["no_wrap"] = True
         caller = os.environ.get("CCB_CALLER", "").strip()
-        if caller:
-            payload["caller"] = caller
-            if caller == "email":
-                payload["email_req_id"] = os.environ.get("CCB_EMAIL_REQ_ID", "").strip()
-                payload["email_msg_id"] = os.environ.get("CCB_EMAIL_MSG_ID", "").strip()
-                payload["email_from"] = os.environ.get("CCB_EMAIL_FROM", "").strip()
-            elif caller == "telegram":
-                payload["telegram_req_id"] = os.environ.get("CCB_TELEGRAM_REQ_ID", "").strip()
-                payload["telegram_chat_id"] = os.environ.get("CCB_TELEGRAM_CHAT_ID", "").strip()
-                payload["telegram_msg_id"] = os.environ.get("CCB_TELEGRAM_MSG_ID", "").strip()
+        if not caller:
+            caller = "manual"
+        
+        payload["caller"] = caller
+        if caller == "email":
+            payload["email_req_id"] = os.environ.get("CCB_EMAIL_REQ_ID", "").strip()
+            payload["email_msg_id"] = os.environ.get("CCB_EMAIL_MSG_ID", "").strip()
+            payload["email_from"] = os.environ.get("CCB_EMAIL_FROM", "").strip()
+        elif caller == "telegram":
+            payload["telegram_req_id"] = os.environ.get("CCB_TELEGRAM_REQ_ID", "").strip()
+            payload["telegram_chat_id"] = os.environ.get("CCB_TELEGRAM_CHAT_ID", "").strip()
+            payload["telegram_msg_id"] = os.environ.get("CCB_TELEGRAM_MSG_ID", "").strip()
         connect_timeout = min(1.0, max(0.1, float(timeout)))
         with socket.create_connection((host, port), timeout=connect_timeout) as sock:
             sock.settimeout(0.5)
